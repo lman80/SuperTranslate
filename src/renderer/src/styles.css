@@ -406,6 +406,28 @@ body {
   text-align: center;
 }
 
+/* ---- Voice volume ---- */
+.voicebar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px 0;
+}
+.voicebar input[type='range'] {
+  flex: 1;
+  accent-color: var(--you);
+}
+.vol-ico {
+  font-size: 13px;
+}
+.vol-pct {
+  font-size: 11px;
+  color: var(--muted);
+  width: 38px;
+  text-align: right;
+}
+
 /* ---- Controls ---- */
 .controls {
   flex: 0 0 auto;

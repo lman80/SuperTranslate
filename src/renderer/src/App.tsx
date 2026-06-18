@@ -22,6 +22,7 @@ interface Settings {
   ttsEngine: 'system' | 'elevenlabs'
   elevenLabsApiKey: string
   elevenLabsVoiceId: string
+  voiceVolume: number
   ttsRate: number
   responseSpeed: 'fast' | 'balanced' | 'accurate'
   turboMode: boolean
@@ -92,7 +93,18 @@ export default function App() {
   const voicesRef = useRef<SpeechSynthesisVoice[]>([])
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null)
   const turboCtxRef = useRef<AudioContext | null>(null)
+  const turboGainRef = useRef<GainNode | null>(null)
   const turboNextTimeRef = useRef(0)
+  const voiceVolumeRef = useRef(1)
+  const volSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const setVoiceVolume = useCallback((v: number) => {
+    voiceVolumeRef.current = v
+    if (turboGainRef.current) turboGainRef.current.gain.value = v
+    setSettings((prev) => (prev ? { ...prev, voiceVolume: v } : prev))
+    if (volSaveTimer.current) clearTimeout(volSaveTimer.current)
+    volSaveTimer.current = setTimeout(() => window.api.saveSettings({ voiceVolume: v }), 400)
+  }, [])
 
   // Play streaming 24kHz PCM audio from Gemini Turbo, scheduling chunks back-to-back.
   const playTurboPcm = useCallback((base64: string) => {
@@ -104,16 +116,19 @@ export default function App() {
       if (!turboCtxRef.current) {
         turboCtxRef.current = new AudioContext({ sampleRate: 24000 })
         turboNextTimeRef.current = turboCtxRef.current.currentTime
+        turboGainRef.current = turboCtxRef.current.createGain()
+        turboGainRef.current.connect(turboCtxRef.current.destination)
       }
       const ctx = turboCtxRef.current
       if (ctx.state === 'suspended') void ctx.resume() // browsers can start it suspended → no sound
+      turboGainRef.current!.gain.value = voiceVolumeRef.current
       const f32 = new Float32Array(int16.length)
       for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768
       const buf = ctx.createBuffer(1, f32.length, 24000)
       buf.copyToChannel(f32, 0)
       const node = ctx.createBufferSource()
       node.buffer = buf
-      node.connect(ctx.destination)
+      node.connect(turboGainRef.current!)
       const startAt = Math.max(ctx.currentTime, turboNextTimeRef.current)
       node.start(startAt)
       turboNextTimeRef.current = startAt + buf.duration
@@ -125,6 +140,7 @@ export default function App() {
   // Keep a ref of settings so event handlers (registered once) read fresh values.
   useEffect(() => {
     settingsRef.current = settings
+    if (settings) voiceVolumeRef.current = settings.voiceVolume ?? 1
   }, [settings])
 
   // Load system TTS voices (Electron returns [] until 'voiceschanged' fires).
@@ -177,6 +193,7 @@ export default function App() {
       const utter = new SpeechSynthesisUtterance(text)
       utter.lang = code
       utter.rate = settingsRef.current?.ttsRate ?? 1.15
+      utter.volume = Math.min(1, voiceVolumeRef.current)
       const voice =
         voicesRef.current.find((v) => v.lang === code) ??
         voicesRef.current.find((v) => v.lang.startsWith(base))
@@ -281,6 +298,7 @@ export default function App() {
       try {
         ttsAudioRef.current?.pause()
         const audio = new Audio(`data:${mime};base64,${audioBase64}`)
+        audio.volume = Math.min(1, voiceVolumeRef.current)
         audio.onended = guardOff
         audio.onerror = guardOff
         ttsAudioRef.current = audio
@@ -384,6 +402,7 @@ export default function App() {
       setSystemMuted(false)
       turboCtxRef.current?.close().catch(() => undefined)
       turboCtxRef.current = null
+      turboGainRef.current = null
       if (turboLiveTimer.current) clearTimeout(turboLiveTimer.current)
       setTurboStatus('off')
     } catch {
@@ -600,6 +619,19 @@ export default function App() {
           </span>
         </div>
       )}
+
+      <div className="voicebar" title="Translation voice volume">
+        <span className="vol-ico">🔊</span>
+        <input
+          type="range"
+          min={0}
+          max={1.5}
+          step={0.05}
+          value={settings.voiceVolume}
+          onChange={(e) => setVoiceVolume(Number(e.target.value))}
+        />
+        <span className="vol-pct">{Math.round(settings.voiceVolume * 100)}%</span>
+      </div>
 
       <footer className="controls">
         {running ? (

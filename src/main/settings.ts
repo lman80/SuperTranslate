@@ -22,6 +22,7 @@ export interface Settings {
   ttsEngine: 'system' | 'elevenlabs' // 'system' = free local voice; 'elevenlabs' = premium
   elevenLabsApiKey: string
   elevenLabsVoiceId: string
+  voiceVolume: number // translation voice playback volume (0–1.5, 1 = normal)
   ttsRate: number // playback speed of the spoken translation (1 = normal)
   responseSpeed: 'fast' | 'balanced' | 'accurate' // how long to wait after a pause before finalizing
   turboMode: boolean // real-time speech-to-speech for the other person (Gemini Live Translate)
@@ -46,6 +47,7 @@ const defaults: Settings = {
   ttsEngine: 'system',
   elevenLabsApiKey: '',
   elevenLabsVoiceId: '',
+  voiceVolume: 1,
   ttsRate: 1.25,
   responseSpeed: 'fast',
   turboMode: false,
