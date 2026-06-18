@@ -28,7 +28,9 @@ interface Settings {
   ttsRate: number
   responseSpeed: 'fast' | 'balanced' | 'accurate'
   turboMode: boolean
+  realtimeProvider: 'gemini' | 'openai'
   geminiApiKey: string
+  openaiApiKey: string
   onboarded: boolean
   fontScalePref: number
   dock: Dock
@@ -70,6 +72,7 @@ const PROVIDER_LABEL: Record<Provider, string> = {
 }
 const SONIOX_KEYS_URL = 'https://console.soniox.com'
 const GEMINI_KEYS_URL = 'https://aistudio.google.com/apikey'
+const OPENAI_KEYS_URL = 'https://platform.openai.com/api-keys'
 const KEY_URL: Record<Provider, string> = {
   deepseek: 'https://platform.deepseek.com/api_keys',
   qwen: 'https://bailian.console.alibabacloud.com/?tab=model#/api-key',
@@ -89,6 +92,8 @@ const CAPTURE_KEYS = new Set<keyof Settings>([
   'translateProvider',
   'translateApiKey',
   'sonioxApiKey',
+  'realtimeProvider',
+  'openaiApiKey',
   'ttsEngine',
   'elevenLabsApiKey',
   'elevenLabsVoiceId',
@@ -97,7 +102,7 @@ const CAPTURE_KEYS = new Set<keyof Settings>([
 ])
 
 function engineReady(s: Settings): boolean {
-  if (s.turboMode) return !!s.geminiApiKey
+  if (s.turboMode) return s.realtimeProvider === 'openai' ? !!s.openaiApiKey : !!s.geminiApiKey
   return !!s.sonioxApiKey && !!s.translateApiKey
 }
 
@@ -1128,8 +1133,11 @@ function EnginePopover({
             onPick()
           }}
         >
-          <b>⚡ Turbo</b>
-          <span>Instant interpreter voice · ~$1.40/hr</span>
+          <b>⚡ Turbo {settings.realtimeProvider === 'openai' ? '(OpenAI)' : '(Gemini)'}</b>
+          <span>
+            Instant interpreter voice ·{' '}
+            {settings.realtimeProvider === 'openai' ? '~$2/hr' : '~$1.40/hr'}
+          </span>
         </button>
         <button
           className={`pop-card ${!settings.turboMode ? 'sel' : ''}`}
@@ -1261,26 +1269,58 @@ function SetupSheet({
               Standard
             </button>
           </div>
+          {settings.turboMode && (
+            <div className="seg sm" style={{ marginTop: 8 }}>
+              <button
+                className={settings.realtimeProvider === 'gemini' ? 'on turbo' : ''}
+                onClick={() => applyLive({ realtimeProvider: 'gemini' })}
+              >
+                Gemini · ~$1.40/hr
+              </button>
+              <button
+                className={settings.realtimeProvider === 'openai' ? 'on turbo' : ''}
+                onClick={() => applyLive({ realtimeProvider: 'openai' })}
+              >
+                OpenAI · ~$2/hr
+              </button>
+            </div>
+          )}
           <p className="hint">
             {settings.turboMode
-              ? 'One key. Instant interpreter voice. ~$1.40/hr.'
+              ? settings.realtimeProvider === 'openai'
+                ? 'OpenAI gpt-realtime-translate — flat ~$2/hr, one key, predictable cost.'
+                : 'Gemini Live — ~$1.40/hr, one key.'
               : 'Two keys (Soniox + a translator). Cheaper per hour.'}
           </p>
         </Section>
 
         <Section title="API keys">
           {settings.turboMode ? (
-            <Field label="Gemini key">
-              <input
-                type="password"
-                placeholder="Paste your Gemini key"
-                value={settings.geminiApiKey}
-                onChange={(e) => applyLive({ geminiApiKey: e.target.value.trim() })}
-              />
-              <button className="link" onClick={() => window.api.openExternal(GEMINI_KEYS_URL)}>
-                Get a Gemini key →
-              </button>
-            </Field>
+            settings.realtimeProvider === 'openai' ? (
+              <Field label="OpenAI key">
+                <input
+                  type="password"
+                  placeholder="Paste your OpenAI key (sk-…)"
+                  value={settings.openaiApiKey}
+                  onChange={(e) => applyLive({ openaiApiKey: e.target.value.trim() })}
+                />
+                <button className="link" onClick={() => window.api.openExternal(OPENAI_KEYS_URL)}>
+                  Get an OpenAI key →
+                </button>
+              </Field>
+            ) : (
+              <Field label="Gemini key">
+                <input
+                  type="password"
+                  placeholder="Paste your Gemini key"
+                  value={settings.geminiApiKey}
+                  onChange={(e) => applyLive({ geminiApiKey: e.target.value.trim() })}
+                />
+                <button className="link" onClick={() => window.api.openExternal(GEMINI_KEYS_URL)}>
+                  Get a Gemini key →
+                </button>
+              </Field>
+            )
           ) : (
             <>
               <Field label="Soniox key (speech)">

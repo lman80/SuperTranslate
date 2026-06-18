@@ -13,6 +13,7 @@ import { appendFileSync, writeFileSync } from 'fs'
 import { loadSettings, saveSettings, type Settings, type Provider, type Dock } from './settings'
 import { SonioxSession } from './soniox'
 import { GeminiLiveSession } from './geminiLive'
+import { OpenAIRealtimeSession } from './openaiRealtime'
 import { MacSystemTap, listRunningApps } from './systemAudioMac'
 import { translateStream } from './translate'
 import { elevenLabsTts } from './tts'
@@ -26,6 +27,7 @@ type Source = 'mic' | 'system'
 const SONIOX_USD_PER_MIN = 0.12 / 60
 const ELEVENLABS_USD_PER_MCHAR = 100 // ≈ $0.10 per 1k characters (conservative)
 const GEMINI_TURBO_USD_PER_MIN = 0.023 // Gemini 3.5 Live Translate, all-in
+const OPENAI_REALTIME_USD_PER_MIN = 0.034 // gpt-realtime-translate (~$2/hr)
 const ACCRUAL_SECONDS = 5
 // How long Soniox waits after a pause before finalizing a sentence.
 // Lower = snappier but splits sentences more; higher = fewer splits but more lag.
@@ -41,9 +43,12 @@ const TRANSLATE_RATES: Record<Provider, { in: number; out: number }> = {
 }
 
 let win: BrowserWindow | null = null
-const sessions: Record<Source, SonioxSession | GeminiLiveSession | null> = { mic: null, system: null }
-let systemIsGemini = false
-let geminiFinalizeTimer: ReturnType<typeof setTimeout> | null = null
+const sessions: Record<Source, SonioxSession | GeminiLiveSession | OpenAIRealtimeSession | null> = {
+  mic: null,
+  system: null
+}
+let systemKind: 'soniox' | 'gemini' | 'openai' = 'soniox'
+let turboFinalizeTimer: ReturnType<typeof setTimeout> | null = null
 let macTap: MacSystemTap | null = null
 let lastLevelSent = 0
 let running = false
@@ -228,10 +233,10 @@ function stopSession(source: Source): void {
   sessions[source]?.stop()
   sessions[source] = null
   if (source === 'system') {
-    systemIsGemini = false
-    if (geminiFinalizeTimer) {
-      clearTimeout(geminiFinalizeTimer)
-      geminiFinalizeTimer = null
+    systemKind = 'soniox'
+    if (turboFinalizeTimer) {
+      clearTimeout(turboFinalizeTimer)
+      turboFinalizeTimer = null
     }
   }
 }
@@ -263,18 +268,21 @@ function capTail(s: string, n: number): string {
   return s.length > n ? '…' + s.slice(-n) : s
 }
 
-// Real-time speech-to-speech for the other person via Gemini Live Translate.
-function startGeminiSystemSession(s: Settings): void {
+// Real-time speech-to-speech for the other person ("Turbo"). Provider is either
+// Gemini Live Translate or OpenAI gpt-realtime-translate — both share the same
+// callback shape, so the transcript-merge/finalize logic is identical.
+function startRealtimeSystemSession(s: Settings): void {
   const targetLang = s.myLanguage === 'auto' ? 'en' : s.myLanguage
-  dbg(`gemini start target=${targetLang}`)
+  const useOpenAI = s.realtimeProvider === 'openai'
+  dbg(`realtime start provider=${useOpenAI ? 'openai' : 'gemini'} target=${targetLang}`)
   let orig = ''
   let trans = ''
   let turnSeq = 0
 
   const finalizeTurn = (): void => {
-    if (geminiFinalizeTimer) {
-      clearTimeout(geminiFinalizeTimer)
-      geminiFinalizeTimer = null
+    if (turboFinalizeTimer) {
+      clearTimeout(turboFinalizeTimer)
+      turboFinalizeTimer = null
     }
     const o = collapseRepeats(orig).trim()
     const tr = collapseRepeats(trans).trim()
@@ -287,13 +295,13 @@ function startGeminiSystemSession(s: Settings): void {
       send('caption:translation', { id, translation: tr, final: true, source: 'system', targetLang })
     }
   }
-  // End the line after a short pause even if Gemini doesn't send turnComplete.
+  // End the line after a short pause even if the provider doesn't send turnComplete.
   const scheduleFinalize = (): void => {
-    if (geminiFinalizeTimer) clearTimeout(geminiFinalizeTimer)
-    geminiFinalizeTimer = setTimeout(finalizeTurn, 1200)
+    if (turboFinalizeTimer) clearTimeout(turboFinalizeTimer)
+    turboFinalizeTimer = setTimeout(finalizeTurn, 1200)
   }
-  // Live line prefers the ENGLISH translation (what the user wants to read), falling
-  // back to the original until the translation catches up. Capped so it can't grow.
+  // Live line prefers the translation (what the user wants to read), falling back to
+  // the original until the translation catches up. Capped so it can't grow.
   const sendLive = (): void => {
     const live = collapseRepeats((trans || orig).trim())
     send('caption:partial', { source: 'system', text: capTail(live, 160) })
@@ -303,48 +311,51 @@ function startGeminiSystemSession(s: Settings): void {
     if (trans.length > 200 || orig.length > 280) finalizeTurn()
   }
 
-  const gem = new GeminiLiveSession(
-    { apiKey: s.geminiApiKey, targetLanguageCode: targetLang },
-    {
-      onStatus: (status, detail) => {
-        dbg(`gemini status=${status} ${detail ?? ''}`)
-        send('status', { source: 'system', status })
-      },
-      onError: (message) => {
-        dbg(`gemini ERROR ${message}`)
-        send('error', { source: 'system', message })
-      },
-      onOriginal: (t) => {
-        orig = mergeTranscript(orig, t)
-        sendLive()
-        scheduleFinalize()
-        maybeForceFinalize()
-      },
-      onTranslated: (t) => {
-        trans = mergeTranscript(trans, t)
-        sendLive()
-        scheduleFinalize()
-        maybeForceFinalize()
-      },
-      onAudio: (b64) => send('turbo:audio', { data: b64 }),
-      onTurnComplete: () => {
-        dbg('gemini turnComplete')
-        finalizeTurn()
-      }
-    }
-  )
-  sessions.system = gem
-  systemIsGemini = true
-  void gem.start()
+  const callbacks = {
+    onStatus: (status: string, detail?: string) => {
+      dbg(`realtime status=${status} ${detail ?? ''}`)
+      send('status', { source: 'system', status })
+    },
+    onError: (message: string) => {
+      dbg(`realtime ERROR ${message}`)
+      send('error', { source: 'system', message })
+    },
+    onOriginal: (t: string) => {
+      orig = mergeTranscript(orig, t)
+      sendLive()
+      scheduleFinalize()
+      maybeForceFinalize()
+    },
+    onTranslated: (t: string) => {
+      trans = mergeTranscript(trans, t)
+      sendLive()
+      scheduleFinalize()
+      maybeForceFinalize()
+    },
+    onAudio: (b64: string) => send('turbo:audio', { data: b64 }),
+    onTurnComplete: () => {
+      dbg('realtime turnComplete')
+      finalizeTurn()
+    },
+    onLog: (m: string) => dbg(`openai: ${m}`)
+  }
+
+  const session = useOpenAI
+    ? new OpenAIRealtimeSession({ apiKey: s.openaiApiKey, targetLanguageCode: targetLang }, callbacks)
+    : new GeminiLiveSession({ apiKey: s.geminiApiKey, targetLanguageCode: targetLang }, callbacks)
+  sessions.system = session
+  systemKind = useOpenAI ? 'openai' : 'gemini'
+  void session.start()
 }
 
 function startSession(source: Source, s: Settings): void {
   stopSession(source)
   dbg(`startSession source=${source} turbo=${s.turboMode} hasGemini=${!!s.geminiApiKey}`)
 
-  // Turbo: the other person's channel goes through Gemini real-time speech-to-speech.
-  if (source === 'system' && s.turboMode && s.geminiApiKey) {
-    startGeminiSystemSession(s)
+  // Turbo: the other person's channel goes through a real-time speech-to-speech engine.
+  const turboKey = s.realtimeProvider === 'openai' ? s.openaiApiKey : s.geminiApiKey
+  if (source === 'system' && s.turboMode && turboKey) {
+    startRealtimeSystemSession(s)
     return
   }
 
@@ -483,7 +494,13 @@ function startAccrual(): void {
     let usd = 0
     if (sessions.mic) usd += SONIOX_USD_PER_MIN * dtMin
     if (sessions.system) {
-      usd += (systemIsGemini ? GEMINI_TURBO_USD_PER_MIN : SONIOX_USD_PER_MIN) * dtMin
+      const rate =
+        systemKind === 'openai'
+          ? OPENAI_REALTIME_USD_PER_MIN
+          : systemKind === 'gemini'
+            ? GEMINI_TURBO_USD_PER_MIN
+            : SONIOX_USD_PER_MIN
+      usd += rate * dtMin
     }
     if (usd > 0) await addStt(usd)
     await emitUsage()
@@ -522,9 +539,14 @@ ipcMain.handle('usage:get', async () => {
 
 ipcMain.handle('capture:start', async () => {
   const s = await loadSettings()
-  // Mode-aware key check (mirrors the renderer's engineReady): Turbo needs only Gemini.
+  // Mode-aware key check (mirrors the renderer's engineReady): Turbo needs only its
+  // realtime provider's key; Standard needs Soniox.
   if (s.turboMode) {
-    if (!s.geminiApiKey) throw new Error('Add your Gemini API key in Settings first.')
+    if (s.realtimeProvider === 'openai') {
+      if (!s.openaiApiKey) throw new Error('Add your OpenAI API key in Settings first.')
+    } else if (!s.geminiApiKey) {
+      throw new Error('Add your Gemini API key in Settings first.')
+    }
   } else if (!s.sonioxApiKey) {
     throw new Error('Add your Soniox API key in Settings first.')
   }

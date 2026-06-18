@@ -3,6 +3,7 @@ import { join } from 'path'
 import { promises as fs } from 'fs'
 
 export type Provider = 'deepseek' | 'qwen' | 'openrouter'
+export type RealtimeProvider = 'gemini' | 'openai'
 export type Dock = 'top-center' | 'bottom-center' | 'top-left' | 'top-right' | 'free'
 
 export interface Settings {
@@ -26,8 +27,10 @@ export interface Settings {
   voiceVolume: number // translation voice playback volume (0–1.5, 1 = normal)
   ttsRate: number // playback speed of the spoken translation (1 = normal)
   responseSpeed: 'fast' | 'balanced' | 'accurate' // how long to wait after a pause before finalizing
-  turboMode: boolean // real-time speech-to-speech for the other person (Gemini Live Translate)
+  turboMode: boolean // real-time speech-to-speech for the other person
+  realtimeProvider: RealtimeProvider // which Turbo engine: Gemini Live or OpenAI Realtime
   geminiApiKey: string
+  openaiApiKey: string // OpenAI key for the gpt-realtime-translate Turbo engine
   onboarded: boolean // has the user completed (or skipped) first-run setup
   fontScalePref: number // active font scale chosen via A-/A+ (overrides fontScale when set)
   dock: Dock // overlay docking position on screen
@@ -57,7 +60,9 @@ const defaults: Settings = {
   ttsRate: 1.25,
   responseSpeed: 'fast',
   turboMode: false,
+  realtimeProvider: 'gemini',
   geminiApiKey: '',
+  openaiApiKey: '',
   onboarded: false,
   fontScalePref: 1,
   dock: 'top-center'
