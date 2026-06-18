@@ -71,12 +71,14 @@ export class OpenAIRealtimeSession {
         this.attempts = 0
         this.cb.onStatus('open')
         // Configure as a simultaneous interpreter into the target language.
+        // The /realtime/translations endpoint does NOT accept an input `format`
+        // override (it expects its default 24kHz mono PCM16 — which is what we
+        // upsample to before sending). Only set transcription + output language.
         this.sendJson({
           type: 'session.update',
           session: {
             audio: {
               input: {
-                format: { type: 'audio/pcm', rate: OUT_RATE },
                 transcription: { model: 'gpt-realtime-whisper' },
                 noise_reduction: { type: 'near_field' }
               },
