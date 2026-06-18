@@ -637,11 +637,14 @@ function SettingsPanel({
             <input
               type="range"
               min={0.8}
-              max={1.5}
+              max={1.6}
               step={0.05}
               value={s.ttsRate}
               onChange={(e) => set('ttsRate', Number(e.target.value))}
             />
+            <p className="hint">
+              Built-in voice goes up to 1.6×. ElevenLabs caps at 1.2× (model limit).
+            </p>
           </section>
         )}
 

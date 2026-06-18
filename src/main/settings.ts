@@ -36,8 +36,8 @@ const defaults: Settings = {
   ttsEngine: 'system',
   elevenLabsApiKey: '',
   elevenLabsVoiceId: '',
-  ttsRate: 1.15,
-  responseSpeed: 'balanced'
+  ttsRate: 1.25,
+  responseSpeed: 'fast'
 }
 
 function settingsFile(): string {

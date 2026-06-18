@@ -40,10 +40,10 @@ function send(channel: string, payload: unknown): void {
 
 function createWindow(): void {
   win = new BrowserWindow({
-    width: 860,
-    height: 480,
+    width: 880,
+    height: 580,
     minWidth: 520,
-    minHeight: 300,
+    minHeight: 360,
     show: false,
     frame: false,
     transparent: true,
