@@ -12,12 +12,16 @@ function getWorkletUrl(): string {
   return workletBlobUrl
 }
 
-// While the app is speaking a translation aloud, we mute capture so the spoken
-// audio isn't picked up by the system-audio loopback (or mic) and re-translated
-// in a feedback loop.
-let captureMuted = false
-export function setCaptureMuted(muted: boolean): void {
-  captureMuted = muted
+// Per-source muting so a spoken translation isn't fed back in. We mute the MIC
+// while any voice plays (so it doesn't transcribe the dub), and mute SYSTEM only
+// for the non-Turbo TTS path (Turbo/Gemini needs continuous system input).
+let micMuted = false
+let systemMuted = false
+export function setMicMuted(muted: boolean): void {
+  micMuted = muted
+}
+export function setSystemMuted(muted: boolean): void {
+  systemMuted = muted
 }
 
 export interface CaptureResult {
@@ -27,9 +31,12 @@ export interface CaptureResult {
 
 export interface CaptureOptions {
   captureSystemAudio: boolean
+  captureMic: boolean
   onWarning: (message: string) => void
   onSystemLevel?: (rms: number) => void // live loudness of captured system audio (0..1)
 }
+
+const BATCH_SAMPLES = 1600 // ~100ms at 16kHz — what Gemini/Soniox prefer
 
 async function pipeStreamToPcm(
   source: 'mic' | 'system',
@@ -45,9 +52,30 @@ async function pipeStreamToPcm(
     numberOfOutputs: 1,
     channelCount: 1
   })
+  // Batch the worklet's tiny 128-sample frames into ~100ms chunks before sending.
+  let batch: Int16Array[] = []
+  let batched = 0
   worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
-    if (captureMuted) return // don't feed our own spoken translation back in
-    window.api.sendAudio(source, e.data)
+    const muted = source === 'mic' ? micMuted : systemMuted
+    if (muted) {
+      batch = []
+      batched = 0
+      return // don't feed our own spoken translation back in
+    }
+    const frame = new Int16Array(e.data)
+    batch.push(frame)
+    batched += frame.length
+    if (batched >= BATCH_SAMPLES) {
+      const merged = new Int16Array(batched)
+      let off = 0
+      for (const c of batch) {
+        merged.set(c, off)
+        off += c.length
+      }
+      batch = []
+      batched = 0
+      window.api.sendAudio(source, merged.buffer)
+    }
   }
   // Keep the graph "pulled" without audible playback (gain 0 -> destination).
   const mute = ctx.createGain()
@@ -62,15 +90,18 @@ export async function startCapture(opts: CaptureOptions): Promise<CaptureResult>
   const streams: MediaStream[] = []
   const timers: ReturnType<typeof setInterval>[] = []
   let systemAudioActive = false
-  captureMuted = false
+  micMuted = false
+  systemMuted = false
 
-  // 1. Microphone (you)
-  const mic = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    video: false
-  })
-  streams.push(mic)
-  await pipeStreamToPcm('mic', mic, contexts)
+  // 1. Microphone (you) — only if enabled.
+  if (opts.captureMic) {
+    const mic = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false
+    })
+    streams.push(mic)
+    await pipeStreamToPcm('mic', mic, contexts)
+  }
 
   // 2. System audio (the other person on the call).
   // getDisplayMedia REQUIRES a video track — requesting video:false throws

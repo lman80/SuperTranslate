@@ -41,6 +41,7 @@ const TRANSLATE_RATES: Record<Provider, { in: number; out: number }> = {
 let win: BrowserWindow | null = null
 const sessions: Record<Source, SonioxSession | GeminiLiveSession | null> = { mic: null, system: null }
 let systemIsGemini = false
+let geminiFinalizeTimer: ReturnType<typeof setTimeout> | null = null
 let running = false
 let activeSettings: Settings | null = null
 let accrualTimer: ReturnType<typeof setInterval> | null = null
@@ -94,7 +95,23 @@ function createWindow(): void {
 function stopSession(source: Source): void {
   sessions[source]?.stop()
   sessions[source] = null
-  if (source === 'system') systemIsGemini = false
+  if (source === 'system') {
+    systemIsGemini = false
+    if (geminiFinalizeTimer) {
+      clearTimeout(geminiFinalizeTimer)
+      geminiFinalizeTimer = null
+    }
+  }
+}
+
+// Gemini sends transcript text that can be incremental, cumulative, OR a repeat.
+// Merge robustly so we never duplicate (which looked like "looping").
+function mergeTranscript(buf: string, delta: string): string {
+  if (!delta) return buf
+  if (!buf) return delta
+  if (delta.startsWith(buf)) return delta // cumulative
+  if (buf.endsWith(delta)) return buf // duplicate piece
+  return buf + delta // incremental
 }
 
 // Real-time speech-to-speech for the other person via Gemini Live Translate.
@@ -104,6 +121,29 @@ function startGeminiSystemSession(s: Settings): void {
   let orig = ''
   let trans = ''
   let turnSeq = 0
+
+  const finalizeTurn = (): void => {
+    if (geminiFinalizeTimer) {
+      clearTimeout(geminiFinalizeTimer)
+      geminiFinalizeTimer = null
+    }
+    const o = orig.trim()
+    const tr = trans.trim()
+    orig = ''
+    trans = ''
+    send('caption:partial', { source: 'system', text: '' })
+    if (o || tr) {
+      const id = `turbo-${Date.now()}-${turnSeq++}`
+      send('caption:final', { id, source: 'system', original: o, sourceLang: s.theirLanguage, targetLang })
+      send('caption:translation', { id, translation: tr, final: true, source: 'system', targetLang })
+    }
+  }
+  // End the line after a short pause even if Gemini doesn't send turnComplete.
+  const scheduleFinalize = (): void => {
+    if (geminiFinalizeTimer) clearTimeout(geminiFinalizeTimer)
+    geminiFinalizeTimer = setTimeout(finalizeTurn, 1500)
+  }
+
   const gem = new GeminiLiveSession(
     { apiKey: s.geminiApiKey, targetLanguageCode: targetLang },
     {
@@ -116,42 +156,18 @@ function startGeminiSystemSession(s: Settings): void {
         send('error', { source: 'system', message })
       },
       onOriginal: (t) => {
-        dbg(`gemini original="${t.slice(0, 40)}"`)
-        orig += t
+        orig = mergeTranscript(orig, t)
         send('caption:partial', { source: 'system', text: orig.trim() })
+        scheduleFinalize()
       },
       onTranslated: (t) => {
-        dbg(`gemini translated="${t.slice(0, 40)}"`)
-        trans += t
+        trans = mergeTranscript(trans, t)
+        scheduleFinalize()
       },
-      onAudio: (b64) => {
-        dbg(`gemini audio chunk bytes=${b64.length}`)
-        send('turbo:audio', { data: b64 })
-      },
+      onAudio: (b64) => send('turbo:audio', { data: b64 }),
       onTurnComplete: () => {
         dbg('gemini turnComplete')
-        const o = orig.trim()
-        const tr = trans.trim()
-        orig = ''
-        trans = ''
-        send('caption:partial', { source: 'system', text: '' })
-        if (o || tr) {
-          const id = `turbo-${Date.now()}-${turnSeq++}`
-          send('caption:final', {
-            id,
-            source: 'system',
-            original: o,
-            sourceLang: s.theirLanguage,
-            targetLang
-          })
-          send('caption:translation', {
-            id,
-            translation: tr,
-            final: true,
-            source: 'system',
-            targetLang
-          })
-        }
+        finalizeTurn()
       }
     }
   )

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { startCapture, setCaptureMuted, type CaptureResult } from './audio'
+import { startCapture, setMicMuted, setSystemMuted, type CaptureResult } from './audio'
 
 type Source = 'mic' | 'system'
 type Provider = 'deepseek' | 'qwen' | 'openrouter'
@@ -13,6 +13,7 @@ interface Settings {
   fontScale: number
   showOriginal: boolean
   captureSystemAudio: boolean
+  captureMic: boolean
   monthlyBudgetUSD: number
   speakAloud: boolean
   ttsEngine: 'system' | 'elevenlabs'
@@ -135,16 +136,32 @@ export default function App() {
     }
   }, [])
 
-  // Mute capture while we speak so the translation isn't re-heard and re-translated.
+  // Non-Turbo TTS: mute BOTH mic and system while we speak (so neither re-hears the dub).
   const ttsGuardTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const guardOn = useCallback(() => {
-    setCaptureMuted(true)
+    setMicMuted(true)
+    setSystemMuted(true)
     if (ttsGuardTimer.current) clearTimeout(ttsGuardTimer.current)
-    ttsGuardTimer.current = setTimeout(() => setCaptureMuted(false), 20000) // safety
+    ttsGuardTimer.current = setTimeout(() => {
+      setMicMuted(false)
+      setSystemMuted(false)
+    }, 20000) // safety
   }, [])
   const guardOff = useCallback(() => {
     if (ttsGuardTimer.current) clearTimeout(ttsGuardTimer.current)
-    ttsGuardTimer.current = setTimeout(() => setCaptureMuted(false), 400) // small tail
+    ttsGuardTimer.current = setTimeout(() => {
+      setMicMuted(false)
+      setSystemMuted(false)
+    }, 400) // small tail
+  }, [])
+
+  // Turbo: mute ONLY the mic while Gemini's dub plays (so the mic doesn't transcribe
+  // the English voice as "You"). System keeps flowing so Gemini gets continuous input.
+  const turboGuardTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const turboMicGuard = useCallback((msUntilDone: number) => {
+    setMicMuted(true)
+    if (turboGuardTimer.current) clearTimeout(turboGuardTimer.current)
+    turboGuardTimer.current = setTimeout(() => setMicMuted(false), msUntilDone + 350)
   }, [])
 
   const speak = useCallback(
@@ -231,6 +248,9 @@ export default function App() {
     )
     const offTurbo = window.api.onTurboAudio(({ data }) => {
       playTurboPcm(data)
+      const ctx = turboCtxRef.current
+      const msLeft = ctx ? Math.max(0, (turboNextTimeRef.current - ctx.currentTime) * 1000) : 600
+      turboMicGuard(msLeft) // mute mic while the dub plays so it isn't transcribed as "You"
       setTurboStatus('live')
       if (turboLiveTimer.current) clearTimeout(turboLiveTimer.current)
       turboLiveTimer.current = setTimeout(() => setTurboStatus('ready'), 1500)
@@ -282,7 +302,7 @@ export default function App() {
       offTurbo()
       offStatus()
     }
-  }, [flash, speak, guardOn, guardOff, playTurboPcm])
+  }, [flash, speak, guardOn, guardOff, playTurboPcm, turboMicGuard])
 
   // Auto-scroll the feed only when the user is already at the bottom, so scrolling
   // up to re-read isn't interrupted every time someone speaks.
@@ -318,6 +338,7 @@ export default function App() {
       }
       captureRef.current = await startCapture({
         captureSystemAudio: settings.captureSystemAudio,
+        captureMic: settings.captureMic,
         onWarning: (m) => flash(m, true),
         onSystemLevel: (rms) => setSystemLevel(rms)
       })
@@ -338,7 +359,9 @@ export default function App() {
       ttsAudioRef.current?.pause()
       ttsAudioRef.current = null
       if (ttsGuardTimer.current) clearTimeout(ttsGuardTimer.current)
-      setCaptureMuted(false)
+      if (turboGuardTimer.current) clearTimeout(turboGuardTimer.current)
+      setMicMuted(false)
+      setSystemMuted(false)
       turboCtxRef.current?.close().catch(() => undefined)
       turboCtxRef.current = null
       if (turboLiveTimer.current) clearTimeout(turboLiveTimer.current)
@@ -725,6 +748,14 @@ function SettingsPanel({
               </button>
             </>
           )}
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={s.captureMic}
+              onChange={(e) => set('captureMic', e.target.checked)}
+            />
+            <span>Translate my microphone (your voice). Turn OFF for incoming-only (avoids the mic picking up your speakers).</span>
+          </label>
           <label className="toggle">
             <input
               type="checkbox"
