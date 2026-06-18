@@ -114,6 +114,23 @@ function mergeTranscript(buf: string, delta: string): string {
   return buf + delta // incremental
 }
 
+// Collapse consecutive duplicate phrases (split on CJK/Latin punctuation), which is
+// how Gemini's streaming transcript "loops."
+function collapseRepeats(s: string): string {
+  const parts = s.split(/(?<=[,，。.!?！？、])/)
+  const out: string[] = []
+  for (const p of parts) {
+    if (out.length && out[out.length - 1].trim() === p.trim() && p.trim()) continue
+    out.push(p)
+  }
+  return out.join('')
+}
+
+// Show only the recent tail so a long/looping line never becomes a wall of text.
+function capTail(s: string, n: number): string {
+  return s.length > n ? '…' + s.slice(-n) : s
+}
+
 // Real-time speech-to-speech for the other person via Gemini Live Translate.
 function startGeminiSystemSession(s: Settings): void {
   const targetLang = s.myLanguage === 'auto' ? 'en' : s.myLanguage
@@ -127,8 +144,8 @@ function startGeminiSystemSession(s: Settings): void {
       clearTimeout(geminiFinalizeTimer)
       geminiFinalizeTimer = null
     }
-    const o = orig.trim()
-    const tr = trans.trim()
+    const o = collapseRepeats(orig).trim()
+    const tr = collapseRepeats(trans).trim()
     orig = ''
     trans = ''
     send('caption:partial', { source: 'system', text: '' })
@@ -141,7 +158,17 @@ function startGeminiSystemSession(s: Settings): void {
   // End the line after a short pause even if Gemini doesn't send turnComplete.
   const scheduleFinalize = (): void => {
     if (geminiFinalizeTimer) clearTimeout(geminiFinalizeTimer)
-    geminiFinalizeTimer = setTimeout(finalizeTurn, 1500)
+    geminiFinalizeTimer = setTimeout(finalizeTurn, 1200)
+  }
+  // Live line prefers the ENGLISH translation (what the user wants to read), falling
+  // back to the original until the translation catches up. Capped so it can't grow.
+  const sendLive = (): void => {
+    const live = collapseRepeats((trans || orig).trim())
+    send('caption:partial', { source: 'system', text: capTail(live, 160) })
+  }
+  // Hard cap: commit and reset before the buffer can balloon into a loop.
+  const maybeForceFinalize = (): void => {
+    if (trans.length > 200 || orig.length > 280) finalizeTurn()
   }
 
   const gem = new GeminiLiveSession(
@@ -157,12 +184,15 @@ function startGeminiSystemSession(s: Settings): void {
       },
       onOriginal: (t) => {
         orig = mergeTranscript(orig, t)
-        send('caption:partial', { source: 'system', text: orig.trim() })
+        sendLive()
         scheduleFinalize()
+        maybeForceFinalize()
       },
       onTranslated: (t) => {
         trans = mergeTranscript(trans, t)
+        sendLive()
         scheduleFinalize()
+        maybeForceFinalize()
       },
       onAudio: (b64) => send('turbo:audio', { data: b64 }),
       onTurnComplete: () => {
