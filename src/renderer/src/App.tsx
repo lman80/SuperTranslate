@@ -16,6 +16,7 @@ interface Settings {
   captureMic: boolean
   captureAppPid: number
   captureAppName: string
+  duckOthers: boolean
   monthlyBudgetUSD: number
   speakAloud: boolean
   ttsEngine: 'system' | 'elevenlabs'
@@ -809,6 +810,17 @@ function SettingsPanel({
               onChange={(e) => set('captureMic', e.target.checked)}
             />
             <span>Translate my microphone (your voice). Turn OFF for incoming-only (avoids the mic picking up your speakers).</span>
+          </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={s.duckOthers}
+              onChange={(e) => set('duckOthers', e.target.checked)}
+            />
+            <span>
+              Dim other audio while the translation speaks (macOS). Tip: lowering the source app’s
+              own volume works best.
+            </span>
           </label>
           <label className="toggle">
             <input
