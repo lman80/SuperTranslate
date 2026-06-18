@@ -76,6 +76,8 @@ export default function App() {
   const [toast, setToast] = useState<string>('')
   const [toastErr, setToastErr] = useState(false)
   const [usage, setUsage] = useState<UsageState | null>(null)
+  const [turboStatus, setTurboStatus] = useState<'off' | 'connecting' | 'ready' | 'live'>('off')
+  const turboLiveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const captureRef = useRef<CaptureResult | null>(null)
   const feedRef = useRef<HTMLDivElement | null>(null)
@@ -99,6 +101,7 @@ export default function App() {
         turboNextTimeRef.current = turboCtxRef.current.currentTime
       }
       const ctx = turboCtxRef.current
+      if (ctx.state === 'suspended') void ctx.resume() // browsers can start it suspended → no sound
       const f32 = new Float32Array(int16.length)
       for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768
       const buf = ctx.createBuffer(1, f32.length, 24000)
@@ -225,7 +228,18 @@ export default function App() {
         }
       }
     )
-    const offTurbo = window.api.onTurboAudio(({ data }) => playTurboPcm(data))
+    const offTurbo = window.api.onTurboAudio(({ data }) => {
+      playTurboPcm(data)
+      setTurboStatus('live')
+      if (turboLiveTimer.current) clearTimeout(turboLiveTimer.current)
+      turboLiveTimer.current = setTimeout(() => setTurboStatus('ready'), 1500)
+    })
+    const offStatus = window.api.onStatus(({ source, status }) => {
+      if (source !== 'system' || !settingsRef.current?.turboMode) return
+      if (status === 'connecting') setTurboStatus('connecting')
+      else if (status === 'open') setTurboStatus((s) => (s === 'live' ? s : 'ready'))
+      else if (status === 'closed' || status === 'error') setTurboStatus('off')
+    })
     const offTts = window.api.onTtsPlay(({ audioBase64, mime }) => {
       try {
         ttsAudioRef.current?.pause()
@@ -265,6 +279,7 @@ export default function App() {
       offBudget()
       offTts()
       offTurbo()
+      offStatus()
     }
   }, [flash, speak, guardOn, guardOff, playTurboPcm])
 
@@ -291,6 +306,15 @@ export default function App() {
     setBusy(true)
     try {
       await window.api.startCapture()
+      // Create the Turbo playback context now (inside the click gesture) so it's not suspended.
+      if (settings.turboMode) {
+        setTurboStatus('connecting')
+        if (!turboCtxRef.current) {
+          turboCtxRef.current = new AudioContext({ sampleRate: 24000 })
+          turboNextTimeRef.current = turboCtxRef.current.currentTime
+        }
+        void turboCtxRef.current.resume()
+      }
       captureRef.current = await startCapture({
         captureSystemAudio: settings.captureSystemAudio,
         onWarning: (m) => flash(m, true)
@@ -315,6 +339,8 @@ export default function App() {
       setCaptureMuted(false)
       turboCtxRef.current?.close().catch(() => undefined)
       turboCtxRef.current = null
+      if (turboLiveTimer.current) clearTimeout(turboLiveTimer.current)
+      setTurboStatus('off')
     } catch {
       /* ignore */
     }
@@ -365,6 +391,24 @@ export default function App() {
     setShowSettings(false)
   }, [])
 
+  // Toggle Turbo from the main screen. If no Gemini key yet, open Settings.
+  const toggleTurbo = useCallback(async () => {
+    if (!settings) return
+    const next = !settings.turboMode
+    if (next && !settings.geminiApiKey) {
+      setShowSettings(true)
+      flash('Add your Gemini API key to use Turbo.', true)
+      return
+    }
+    const saved = (await window.api.saveSettings({ turboMode: next })) as Settings
+    setSettings(saved)
+    // Re-init capture so the change takes effect immediately (main re-reads settings).
+    if (running) {
+      await stop()
+      await start()
+    }
+  }, [settings, running, stop, start, flash])
+
   if (!settings) return <div className="boot">Loading…</div>
 
   const fontScale = settings.fontScale || 1
@@ -410,6 +454,22 @@ export default function App() {
         <span className="chip them">
           Them · {LANG_LABEL[settings.theirLanguage] ?? settings.theirLanguage}
         </span>
+        <button
+          className={`turbo-pill ${settings.turboMode ? turboStatus : 'disabled'}`}
+          onClick={toggleTurbo}
+          title="Real-time voice for the other person (Gemini). Plays when their audio comes through."
+        >
+          ⚡{' '}
+          {!settings.turboMode
+            ? 'Turbo off'
+            : turboStatus === 'live'
+              ? 'Turbo LIVE'
+              : turboStatus === 'connecting'
+                ? 'Turbo…'
+                : running
+                  ? 'Turbo ready'
+                  : 'Turbo on'}
+        </button>
       </div>
 
       <main className="feed" ref={feedRef} onScroll={handleFeedScroll}>
