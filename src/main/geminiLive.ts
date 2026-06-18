@@ -10,7 +10,7 @@ export interface GeminiCallbacks {
   onTranslated: (textDelta: string) => void // translated transcript piece
   onAudio: (base64Pcm24k: string) => void // translated audio chunk (24kHz PCM)
   onTurnComplete: () => void
-  onStatus: (status: GeminiStatus) => void
+  onStatus: (status: GeminiStatus, detail?: string) => void
   onError: (message: string) => void
 }
 
@@ -35,7 +35,7 @@ export class GeminiLiveSession {
     this.stopped = false
     this.cb.onStatus('connecting')
     try {
-      const ai = new GoogleGenAI({ apiKey: this.cfg.apiKey })
+      const ai = new GoogleGenAI({ apiKey: this.cfg.apiKey.trim() })
       this.session = await ai.live.connect({
         model: MODEL,
         config: {
@@ -50,9 +50,24 @@ export class GeminiLiveSession {
         callbacks: {
           onopen: () => this.cb.onStatus('open'),
           onmessage: (msg: any) => this.handle(msg),
-          onerror: (e: any) =>
-            this.cb.onError(`Gemini Live error: ${e?.message ?? 'connection failed'}`),
-          onclose: () => this.cb.onStatus('closed')
+          onerror: (e: any) => {
+            const detail = e?.message ?? (() => { try { return JSON.stringify(e) } catch { return String(e) } })()
+            this.cb.onStatus('error', `err=${String(detail).slice(0, 300)}`)
+            this.cb.onError(`Gemini Live error: ${String(detail).slice(0, 200)}`)
+          },
+          onclose: (e: any) => {
+            const reason = String(e?.reason ?? e?.message ?? '')
+            this.session = null
+            this.cb.onStatus('closed', `code=${e?.code ?? '?'} reason=${reason.slice(0, 300)}`)
+            if (this.stopped) return
+            if (e?.code === 1007 || /api[ _]?key not valid|invalid.*key|permission|unauthor/i.test(reason)) {
+              this.cb.onError(
+                'Turbo: your Gemini API key was rejected. Create a fresh key at aistudio.google.com/apikey and paste it in Settings (no spaces).'
+              )
+            } else if (reason) {
+              this.cb.onError(`Turbo disconnected: ${reason.slice(0, 160)}`)
+            }
+          }
         }
       })
       if (this.stopped) this.stop()

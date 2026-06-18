@@ -8,6 +8,7 @@ import {
   systemPreferences
 } from 'electron'
 import { join } from 'path'
+import { appendFileSync, writeFileSync } from 'fs'
 import { loadSettings, saveSettings, type Settings, type Provider } from './settings'
 import { SonioxSession } from './soniox'
 import { GeminiLiveSession } from './geminiLive'
@@ -49,6 +50,19 @@ function send(channel: string, payload: unknown): void {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
 }
 
+// Lightweight debug log to userData/debug.log for diagnosing the capture→STT path.
+function logPath(): string {
+  return join(app.getPath('userData'), 'debug.log')
+}
+function dbg(msg: string): void {
+  try {
+    appendFileSync(logPath(), `${new Date().toISOString()} ${msg}\n`)
+  } catch {
+    /* ignore */
+  }
+}
+const chunkCounts: Record<Source, number> = { mic: 0, system: 0 }
+
 function createWindow(): void {
   win = new BrowserWindow({
     width: 880,
@@ -86,23 +100,36 @@ function stopSession(source: Source): void {
 // Real-time speech-to-speech for the other person via Gemini Live Translate.
 function startGeminiSystemSession(s: Settings): void {
   const targetLang = s.myLanguage === 'auto' ? 'en' : s.myLanguage
+  dbg(`gemini start target=${targetLang}`)
   let orig = ''
   let trans = ''
   let turnSeq = 0
   const gem = new GeminiLiveSession(
     { apiKey: s.geminiApiKey, targetLanguageCode: targetLang },
     {
-      onStatus: (status) => send('status', { source: 'system', status }),
-      onError: (message) => send('error', { source: 'system', message }),
+      onStatus: (status, detail) => {
+        dbg(`gemini status=${status} ${detail ?? ''}`)
+        send('status', { source: 'system', status })
+      },
+      onError: (message) => {
+        dbg(`gemini ERROR ${message}`)
+        send('error', { source: 'system', message })
+      },
       onOriginal: (t) => {
+        dbg(`gemini original="${t.slice(0, 40)}"`)
         orig += t
         send('caption:partial', { source: 'system', text: orig.trim() })
       },
       onTranslated: (t) => {
+        dbg(`gemini translated="${t.slice(0, 40)}"`)
         trans += t
       },
-      onAudio: (b64) => send('turbo:audio', { data: b64 }),
+      onAudio: (b64) => {
+        dbg(`gemini audio chunk bytes=${b64.length}`)
+        send('turbo:audio', { data: b64 })
+      },
       onTurnComplete: () => {
+        dbg('gemini turnComplete')
         const o = orig.trim()
         const tr = trans.trim()
         orig = ''
@@ -159,10 +186,20 @@ function startSession(source: Source, s: Settings): void {
       endpointDelayMs: ENDPOINT_DELAY_MS[s.responseSpeed] ?? 1000
     },
     {
-      onStatus: (status) => send('status', { source, status }),
-      onError: (message) => send('error', { source, message }),
-      onPartial: (text) => send('caption:partial', { source, text }),
+      onStatus: (status) => {
+        dbg(`soniox ${source} status=${status}`)
+        send('status', { source, status })
+      },
+      onError: (message) => {
+        dbg(`soniox ${source} ERROR ${message}`)
+        send('error', { source, message })
+      },
+      onPartial: (text) => {
+        dbg(`soniox ${source} partial="${text.slice(0, 40)}"`)
+        send('caption:partial', { source, text })
+      },
       onFinal: async (text, detectedLang) => {
+        dbg(`soniox ${source} FINAL="${text.slice(0, 60)}" lang=${detectedLang}`)
         const id = `${source}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
         const sourceLang = sourceFixedLang === 'auto' ? detectedLang || 'auto' : sourceFixedLang
         const finalTarget = targetLang === 'auto' ? 'en' : targetLang
@@ -308,6 +345,16 @@ ipcMain.handle('capture:start', async () => {
   if (s.monthlyBudgetUSD > 0 && totalUsd(await getUsage()) >= s.monthlyBudgetUSD) {
     throw new Error('Monthly budget reached. Raise it in Settings to keep going.')
   }
+  try {
+    writeFileSync(logPath(), '') // fresh log each session
+  } catch {
+    /* ignore */
+  }
+  chunkCounts.mic = 0
+  chunkCounts.system = 0
+  dbg(
+    `capture:start turbo=${s.turboMode} captureSystem=${s.captureSystemAudio} their=${s.theirLanguage} my=${s.myLanguage} provider=${s.translateProvider} hasSoniox=${!!s.sonioxApiKey} hasTranslate=${!!s.translateApiKey} hasGemini=${!!s.geminiApiKey}`
+  )
   activeSettings = s
   running = true
   warned80 = false
@@ -345,7 +392,14 @@ ipcMain.handle('capture:stop', async () => {
 // (e.g. when system-audio permission was denied and no audio ever arrives).
 ipcMain.on('audio:chunk', (_e, source: Source, buffer: ArrayBuffer) => {
   if (!running || !activeSettings) return
-  if (!sessions[source]) startSession(source, activeSettings)
+  if (!sessions[source]) {
+    dbg(`first ${source} chunk → creating session (turbo=${activeSettings.turboMode})`)
+    startSession(source, activeSettings)
+  }
+  chunkCounts[source]++
+  if (chunkCounts[source] === 1 || chunkCounts[source] % 100 === 0) {
+    dbg(`audio:chunk ${source} #${chunkCounts[source]} bytes=${buffer.byteLength}`)
+  }
   sessions[source]?.sendAudio(buffer)
 })
 
