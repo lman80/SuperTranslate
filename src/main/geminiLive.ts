@@ -52,20 +52,28 @@ export class GeminiLiveSession {
           onmessage: (msg: any) => this.handle(msg),
           onerror: (e: any) => {
             const detail = e?.message ?? (() => { try { return JSON.stringify(e) } catch { return String(e) } })()
+            // Don't surface an empty error toast — let onclose give a useful message.
             this.cb.onStatus('error', `err=${String(detail).slice(0, 300)}`)
-            this.cb.onError(`Gemini Live error: ${String(detail).slice(0, 200)}`)
+            if (detail && detail !== '{}') this.cb.onError(`Gemini Live error: ${String(detail).slice(0, 200)}`)
           },
           onclose: (e: any) => {
             const reason = String(e?.reason ?? e?.message ?? '')
+            const code = e?.code
             this.session = null
-            this.cb.onStatus('closed', `code=${e?.code ?? '?'} reason=${reason.slice(0, 300)}`)
+            this.cb.onStatus('closed', `code=${code ?? '?'} reason=${reason.slice(0, 300)}`)
             if (this.stopped) return
-            if (e?.code === 1007 || /api[ _]?key not valid|invalid.*key|permission|unauthor/i.test(reason)) {
+            if (code === 1007 || /api[ _]?key not valid|invalid.*key|permission|unauthor/i.test(reason)) {
               this.cb.onError(
                 'Turbo: your Gemini API key was rejected. Create a fresh key at aistudio.google.com/apikey and paste it in Settings (no spaces).'
               )
-            } else if (reason) {
-              this.cb.onError(`Turbo disconnected: ${reason.slice(0, 160)}`)
+            } else if (code === 1011 || /quota|rate|resource_exhausted|limit/i.test(reason)) {
+              this.cb.onError(
+                'Turbo hit a Gemini rate/quota limit. Wait a minute and try again, or enable billing on your Google AI Studio key.'
+              )
+            } else if (code !== 1000) {
+              this.cb.onError(
+                'Turbo lost the connection to Gemini (network hiccup or rate limit). Wait a few seconds and press Start again. If it keeps happening, your free Gemini quota may be limited.'
+              )
             }
           }
         }
