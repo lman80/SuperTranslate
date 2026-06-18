@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { startCapture, type CaptureResult } from './audio'
+import { startCapture, setCaptureMuted, type CaptureResult } from './audio'
 
 type Source = 'mic' | 'system'
 type Provider = 'deepseek' | 'qwen' | 'openrouter'
@@ -18,6 +18,8 @@ interface Settings {
   ttsEngine: 'system' | 'elevenlabs'
   elevenLabsApiKey: string
   elevenLabsVoiceId: string
+  ttsRate: number
+  responseSpeed: 'fast' | 'balanced' | 'accurate'
 }
 
 interface UsageState {
@@ -70,6 +72,7 @@ export default function App() {
   const [entries, setEntries] = useState<Entry[]>([])
   const [partial, setPartial] = useState<{ mic: string; system: string }>({ mic: '', system: '' })
   const [toast, setToast] = useState<string>('')
+  const [toastErr, setToastErr] = useState(false)
   const [usage, setUsage] = useState<UsageState | null>(null)
 
   const captureRef = useRef<CaptureResult | null>(null)
@@ -97,29 +100,50 @@ export default function App() {
     }
   }, [])
 
-  const speak = useCallback((text: string, lang: string) => {
-    if (!text || !window.speechSynthesis) return
-    const code = lang === 'zh' ? 'zh-CN' : lang === 'ko' ? 'ko-KR' : lang === 'en' ? 'en-US' : lang
-    const base = code.split('-')[0]
-    const utter = new SpeechSynthesisUtterance(text)
-    utter.lang = code
-    utter.rate = 1.02
-    const voice =
-      voicesRef.current.find((v) => v.lang === code) ??
-      voicesRef.current.find((v) => v.lang.startsWith(base))
-    if (voice) utter.voice = voice
-    try {
-      window.speechSynthesis.cancel()
-    } catch {
-      /* ignore */
-    }
-    window.speechSynthesis.speak(utter)
+  // Mute capture while we speak so the translation isn't re-heard and re-translated.
+  const ttsGuardTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const guardOn = useCallback(() => {
+    setCaptureMuted(true)
+    if (ttsGuardTimer.current) clearTimeout(ttsGuardTimer.current)
+    ttsGuardTimer.current = setTimeout(() => setCaptureMuted(false), 20000) // safety
+  }, [])
+  const guardOff = useCallback(() => {
+    if (ttsGuardTimer.current) clearTimeout(ttsGuardTimer.current)
+    ttsGuardTimer.current = setTimeout(() => setCaptureMuted(false), 400) // small tail
   }, [])
 
-  const flash = useCallback((msg: string) => {
+  const speak = useCallback(
+    (text: string, lang: string) => {
+      if (!text || !window.speechSynthesis) return
+      const code =
+        lang === 'zh' ? 'zh-CN' : lang === 'ko' ? 'ko-KR' : lang === 'en' ? 'en-US' : lang
+      const base = code.split('-')[0]
+      const utter = new SpeechSynthesisUtterance(text)
+      utter.lang = code
+      utter.rate = settingsRef.current?.ttsRate ?? 1.15
+      const voice =
+        voicesRef.current.find((v) => v.lang === code) ??
+        voicesRef.current.find((v) => v.lang.startsWith(base))
+      if (voice) utter.voice = voice
+      utter.onstart = guardOn
+      utter.onend = guardOff
+      utter.onerror = guardOff
+      try {
+        window.speechSynthesis.cancel()
+      } catch {
+        /* ignore */
+      }
+      guardOn()
+      window.speechSynthesis.speak(utter)
+    },
+    [guardOn, guardOff]
+  )
+
+  const flash = useCallback((msg: string, isError = false) => {
     setToast(msg)
+    setToastErr(isError)
     if (toastTimer.current) clearTimeout(toastTimer.current)
-    toastTimer.current = setTimeout(() => setToast(''), 6000)
+    toastTimer.current = setTimeout(() => setToast(''), isError ? 12000 : 6000)
   }, [])
 
   // Load settings + current spend once.
@@ -173,13 +197,16 @@ export default function App() {
       try {
         ttsAudioRef.current?.pause()
         const audio = new Audio(`data:${mime};base64,${audioBase64}`)
+        audio.onended = guardOff
+        audio.onerror = guardOff
         ttsAudioRef.current = audio
-        void audio.play().catch(() => undefined)
+        guardOn()
+        void audio.play().catch(() => guardOff())
       } catch {
-        /* ignore */
+        guardOff()
       }
     })
-    const offError = window.api.onError(({ message }) => flash(message))
+    const offError = window.api.onError(({ message }) => flash(message, true))
     const offUsage = window.api.onUsage((u) => setUsage(u))
     const offBudget = window.api.onBudget((b) => {
       if (b.reached) {
@@ -205,7 +232,7 @@ export default function App() {
       offBudget()
       offTts()
     }
-  }, [flash, speak])
+  }, [flash, speak, guardOn, guardOff])
 
   // Auto-scroll the feed only when the user is already at the bottom, so scrolling
   // up to re-read isn't interrupted every time someone speaks.
@@ -232,7 +259,7 @@ export default function App() {
       await window.api.startCapture()
       captureRef.current = await startCapture({
         captureSystemAudio: settings.captureSystemAudio,
-        onWarning: flash
+        onWarning: (m) => flash(m, true)
       })
       setRunning(true)
     } catch (e) {
@@ -250,6 +277,8 @@ export default function App() {
       window.speechSynthesis?.cancel()
       ttsAudioRef.current?.pause()
       ttsAudioRef.current = null
+      if (ttsGuardTimer.current) clearTimeout(ttsGuardTimer.current)
+      setCaptureMuted(false)
     } catch {
       /* ignore */
     }
@@ -432,7 +461,15 @@ export default function App() {
         )}
       </footer>
 
-      {toast && <div className="toast">{toast}</div>}
+      {toast && (
+        <div
+          className={`toast${toastErr ? ' err' : ''}`}
+          onClick={() => setToast('')}
+          title="Click to dismiss"
+        >
+          {toast}
+        </div>
+      )}
 
       {showSettings && (
         <SettingsPanel
@@ -594,8 +631,38 @@ function SettingsPanel({
                 </p>
               </>
             )}
+            <label className="field-label" style={{ marginTop: '12px' }}>
+              Talking speed {s.ttsRate.toFixed(2)}×
+            </label>
+            <input
+              type="range"
+              min={0.8}
+              max={1.5}
+              step={0.05}
+              value={s.ttsRate}
+              onChange={(e) => set('ttsRate', Number(e.target.value))}
+            />
           </section>
         )}
+
+        <section>
+          <label className="field-label">Response speed</label>
+          <div className="seg">
+            {(['fast', 'balanced', 'accurate'] as const).map((r) => (
+              <button
+                key={r}
+                className={s.responseSpeed === r ? 'on' : ''}
+                onClick={() => set('responseSpeed', r)}
+              >
+                {r[0].toUpperCase() + r.slice(1)}
+              </button>
+            ))}
+          </div>
+          <p className="hint">
+            Fast = quicker translations, but a slow speaker’s sentence may split in two. Accurate =
+            waits a bit longer so sentences stay whole.
+          </p>
+        </section>
 
         <section>
           <label className="field-label">

@@ -7,6 +7,7 @@ export interface ElevenLabsOptions {
   apiKey: string
   voiceId: string
   text: string
+  speed?: number // 0.7–1.2 for Flash; clamped
 }
 
 export interface TtsResult {
@@ -17,7 +18,8 @@ export interface TtsResult {
 
 export async function elevenLabsTts(opts: ElevenLabsOptions): Promise<TtsResult> {
   const voice = opts.voiceId?.trim() || DEFAULT_VOICE_ID
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128`
+  const speed = Math.max(0.7, Math.min(1.2, opts.speed ?? 1.0))
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voice}?output_format=mp3_44100_128&optimize_streaming_latency=3`
 
   const res = await fetch(url, {
     method: 'POST',
@@ -30,13 +32,29 @@ export async function elevenLabsTts(opts: ElevenLabsOptions): Promise<TtsResult>
       text: opts.text,
       // Flash v2.5 = fastest multilingual model (~75ms TTFB), supports KO/ZH/EN.
       model_id: 'eleven_flash_v2_5',
-      voice_settings: { stability: 0.4, similarity_boost: 0.8, speed: 1.0 }
+      voice_settings: { stability: 0.4, similarity_boost: 0.8, speed }
     })
   })
 
   if (!res.ok) {
     const body = await res.text().catch(() => '')
-    throw new Error(`ElevenLabs ${res.status}: ${body.slice(0, 160)}`)
+    const lc = body.toLowerCase()
+    let friendly: string
+    if (res.status === 401 || res.status === 403) {
+      friendly = 'ElevenLabs key is invalid or lacks permission. Check the key in Settings.'
+    } else if (
+      res.status === 402 ||
+      lc.includes('quota') ||
+      lc.includes('credit') ||
+      lc.includes('insufficient')
+    ) {
+      friendly = 'ElevenLabs is out of credits — top up your account, then it will speak.'
+    } else if (res.status === 429) {
+      friendly = 'ElevenLabs rate limit hit — try again in a moment.'
+    } else {
+      friendly = `ElevenLabs error ${res.status}: ${body.slice(0, 120)}`
+    }
+    throw new Error(friendly)
   }
 
   const audio = Buffer.from(await res.arrayBuffer())

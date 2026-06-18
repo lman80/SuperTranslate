@@ -15,6 +15,7 @@ export interface SonioxCallbacks {
 export interface SonioxConfig {
   apiKey: string
   languageHints: string[]
+  endpointDelayMs?: number // max wait after a pause before finalizing (lower = faster, more splits)
 }
 
 export class SonioxSession {
@@ -52,7 +53,8 @@ export class SonioxSession {
           num_channels: 1,
           language_hints: this.cfg.languageHints,
           enable_language_identification: true,
-          enable_endpoint_detection: true
+          enable_endpoint_detection: true,
+          max_endpoint_delay_ms: this.cfg.endpointDelayMs ?? 1000
         })
       )
       this.cb.onStatus('open')

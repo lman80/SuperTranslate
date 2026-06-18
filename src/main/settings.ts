@@ -18,6 +18,8 @@ export interface Settings {
   ttsEngine: 'system' | 'elevenlabs' // 'system' = free local voice; 'elevenlabs' = premium
   elevenLabsApiKey: string
   elevenLabsVoiceId: string
+  ttsRate: number // playback speed of the spoken translation (1 = normal)
+  responseSpeed: 'fast' | 'balanced' | 'accurate' // how long to wait after a pause before finalizing
 }
 
 const defaults: Settings = {
@@ -33,7 +35,9 @@ const defaults: Settings = {
   speakAloud: false,
   ttsEngine: 'system',
   elevenLabsApiKey: '',
-  elevenLabsVoiceId: ''
+  elevenLabsVoiceId: '',
+  ttsRate: 1.15,
+  responseSpeed: 'balanced'
 }
 
 function settingsFile(): string {

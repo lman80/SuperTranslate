@@ -12,6 +12,14 @@ function getWorkletUrl(): string {
   return workletBlobUrl
 }
 
+// While the app is speaking a translation aloud, we mute capture so the spoken
+// audio isn't picked up by the system-audio loopback (or mic) and re-translated
+// in a feedback loop.
+let captureMuted = false
+export function setCaptureMuted(muted: boolean): void {
+  captureMuted = muted
+}
+
 export interface CaptureResult {
   stop: () => void
   systemAudioActive: boolean
@@ -37,6 +45,7 @@ async function pipeStreamToPcm(
     channelCount: 1
   })
   worklet.port.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+    if (captureMuted) return // don't feed our own spoken translation back in
     window.api.sendAudio(source, e.data)
   }
   // Keep the graph "pulled" without audible playback (gain 0 -> destination).
@@ -51,6 +60,7 @@ export async function startCapture(opts: CaptureOptions): Promise<CaptureResult>
   const contexts: AudioContext[] = []
   const streams: MediaStream[] = []
   let systemAudioActive = false
+  captureMuted = false
 
   // 1. Microphone (you)
   const mic = await navigator.mediaDevices.getUserMedia({

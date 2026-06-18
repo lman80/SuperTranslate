@@ -14,6 +14,13 @@ type Source = 'mic' | 'system'
 const SONIOX_USD_PER_MIN = 0.12 / 60
 const ELEVENLABS_USD_PER_MCHAR = 100 // ≈ $0.10 per 1k characters (conservative)
 const ACCRUAL_SECONDS = 5
+// How long Soniox waits after a pause before finalizing a sentence.
+// Lower = snappier but splits sentences more; higher = fewer splits but more lag.
+const ENDPOINT_DELAY_MS: Record<Settings['responseSpeed'], number> = {
+  fast: 600,
+  balanced: 1000,
+  accurate: 1600
+}
 const TRANSLATE_RATES: Record<Provider, { in: number; out: number }> = {
   deepseek: { in: 0.3, out: 1.2 },
   qwen: { in: 0.4, out: 1.2 },
@@ -78,7 +85,11 @@ function startSession(source: Source, s: Settings): void {
   const targetLang = source === 'mic' ? s.theirLanguage : s.myLanguage
 
   const sess = new SonioxSession(
-    { apiKey: s.sonioxApiKey, languageHints: languageHints.filter(Boolean) },
+    {
+      apiKey: s.sonioxApiKey,
+      languageHints: languageHints.filter(Boolean),
+      endpointDelayMs: ENDPOINT_DELAY_MS[s.responseSpeed] ?? 1000
+    },
     {
       onStatus: (status) => send('status', { source, status }),
       onError: (message) => send('error', { source, message }),
@@ -136,7 +147,8 @@ function startSession(source: Source, s: Settings): void {
               const audio = await elevenLabsTts({
                 apiKey: s.elevenLabsApiKey,
                 voiceId: s.elevenLabsVoiceId,
-                text: result.text
+                text: result.text,
+                speed: s.ttsRate
               })
               send('tts:play', { id, audioBase64: audio.audioBase64, mime: audio.mime })
               await addTts((audio.chars / 1e6) * ELEVENLABS_USD_PER_MCHAR)

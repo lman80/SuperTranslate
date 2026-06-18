@@ -432,6 +432,12 @@ body {
   color: var(--text);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   animation: rise 0.2s ease;
+  cursor: pointer;
+}
+
+.toast.err {
+  border-color: rgba(255, 107, 107, 0.6);
+  background: rgba(46, 26, 30, 0.97);
 }
 
 /* ---- Settings modal ---- */
