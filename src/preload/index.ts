@@ -55,7 +55,8 @@ const api = {
   windowControl: (action: 'minimize' | 'close' | 'pin' | 'unpin') =>
     ipcRenderer.send('window:control', action),
   openExternal: (url: string) => ipcRenderer.send('open-external', url),
-  openScreenSettings: () => ipcRenderer.send('open-screen-settings')
+  openScreenSettings: () => ipcRenderer.send('open-screen-settings'),
+  relaunchApp: () => ipcRenderer.send('app:relaunch')
 }
 
 contextBridge.exposeInMainWorld('api', api)

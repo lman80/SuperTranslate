@@ -703,9 +703,14 @@ function SettingsPanel({
             <span>Capture the other person’s voice from this computer (calls)</span>
           </label>
           {s.captureSystemAudio && (
-            <button className="link" onClick={() => window.api.openScreenSettings()}>
-              Fix “other person’s voice” — open Screen &amp; System Audio Recording settings →
-            </button>
+            <>
+              <button className="link" onClick={() => window.api.openScreenSettings()}>
+                1. Open Screen &amp; System Audio Recording settings → turn on SuperTranslate
+              </button>
+              <button className="link" onClick={() => window.api.relaunchApp()}>
+                2. Restart the app to apply it ↻
+              </button>
+            </>
           )}
           <label className="toggle">
             <input

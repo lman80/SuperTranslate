@@ -350,11 +350,19 @@ ipcMain.on('audio:chunk', (_e, source: Source, buffer: ArrayBuffer) => {
 })
 
 ipcMain.on('window:control', (_e, action: 'minimize' | 'close' | 'pin' | 'unpin') => {
+  if (action === 'close') {
+    app.quit() // fully quit so a reopen is a real restart (needed to apply macOS permissions)
+    return
+  }
   if (!win) return
   if (action === 'minimize') win.minimize()
-  else if (action === 'close') win.close()
   else if (action === 'pin') win.setAlwaysOnTop(true, 'screen-saver')
   else if (action === 'unpin') win.setAlwaysOnTop(false)
+})
+
+ipcMain.on('app:relaunch', () => {
+  app.relaunch()
+  app.exit(0)
 })
 
 ipcMain.on('open-external', (_e, url: string) => {
@@ -364,6 +372,8 @@ ipcMain.on('open-external', (_e, url: string) => {
 // ---- App lifecycle ----
 
 app.whenReady().then(() => {
+  if (process.platform === 'darwin') app.dock?.show()
+
   session.defaultSession.setDisplayMediaRequestHandler(
     async (_request, callback) => {
       try {
@@ -389,5 +399,5 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   void stopAll()
-  if (process.platform !== 'darwin') app.quit()
+  app.quit()
 })
