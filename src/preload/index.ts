@@ -13,6 +13,7 @@ const api = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (patch: unknown) => ipcRenderer.invoke('settings:save', patch),
   getUsage: () => ipcRenderer.invoke('usage:get'),
+  listApps: () => ipcRenderer.invoke('apps:list') as Promise<{ pid: number; name: string }[]>,
 
   startCapture: () => ipcRenderer.invoke('capture:start'),
   stopCapture: () => ipcRenderer.invoke('capture:stop'),
@@ -48,6 +49,7 @@ const api = {
   onTtsPlay: (cb: (p: { id: string; audioBase64: string; mime: string }) => void) =>
     subscribe('tts:play', cb),
   onTurboAudio: (cb: (p: { data: string }) => void) => subscribe('turbo:audio', cb),
+  onSystemLevel: (cb: (p: { rms: number }) => void) => subscribe('system:level', cb),
   onBudget: (
     cb: (p: { reached: boolean; warning?: boolean; spent: number; budget: number }) => void
   ) => subscribe('budget', cb),

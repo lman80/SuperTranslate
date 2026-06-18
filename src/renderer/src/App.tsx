@@ -14,6 +14,8 @@ interface Settings {
   showOriginal: boolean
   captureSystemAudio: boolean
   captureMic: boolean
+  captureAppPid: number
+  captureAppName: string
   monthlyBudgetUSD: number
   speakAloud: boolean
   ttsEngine: 'system' | 'elevenlabs'
@@ -256,6 +258,7 @@ export default function App() {
       if (turboLiveTimer.current) clearTimeout(turboLiveTimer.current)
       turboLiveTimer.current = setTimeout(() => setTurboStatus('ready'), 1500)
     })
+    const offSysLevel = window.api.onSystemLevel(({ rms }) => setSystemLevel(rms))
     const offStatus = window.api.onStatus(({ source, status }) => {
       if (source !== 'system' || !settingsRef.current?.turboMode) return
       if (status === 'connecting') setTurboStatus('connecting')
@@ -302,6 +305,7 @@ export default function App() {
       offTts()
       offTurbo()
       offStatus()
+      offSysLevel()
     }
   }, [flash, speak, guardOn, guardOff, playTurboPcm, turboGuard])
 
@@ -327,7 +331,7 @@ export default function App() {
     }
     setBusy(true)
     try {
-      await window.api.startCapture()
+      const startInfo = (await window.api.startCapture()) as { captureSystemInRenderer?: boolean }
       // Create the Turbo playback context now (inside the click gesture) so it's not suspended.
       if (settings.turboMode) {
         setTurboStatus('connecting')
@@ -338,7 +342,9 @@ export default function App() {
         void turboCtxRef.current.resume()
       }
       captureRef.current = await startCapture({
-        captureSystemAudio: settings.captureSystemAudio,
+        // On macOS the native tap (main process) handles system audio; the renderer
+        // only captures system audio on platforms where startInfo says so (Windows).
+        captureSystemAudio: !!startInfo?.captureSystemInRenderer,
         captureMic: settings.captureMic,
         onWarning: (m) => flash(m, true),
         onSystemLevel: (rms) => setSystemLevel(rms)
@@ -625,8 +631,16 @@ function SettingsPanel({
   onSave: (s: Settings) => void
 }) {
   const [s, setS] = useState<Settings>(initial)
+  const [apps, setApps] = useState<{ pid: number; name: string }[]>([])
   const set = <K extends keyof Settings>(k: K, v: Settings[K]): void =>
     setS((prev) => ({ ...prev, [k]: v }))
+
+  const refreshApps = useCallback(() => {
+    window.api.listApps().then(setApps).catch(() => setApps([]))
+  }, [])
+  useEffect(() => {
+    refreshApps()
+  }, [refreshApps])
 
   const providerLabel = PROVIDER_LABEL[s.translateProvider]
   const translateKeyUrl = KEY_URL[s.translateProvider]
@@ -740,14 +754,38 @@ function SettingsPanel({
             <span>Capture the other person’s voice from this computer (calls)</span>
           </label>
           {s.captureSystemAudio && (
-            <>
-              <button className="link" onClick={() => window.api.openScreenSettings()}>
-                1. Open Screen &amp; System Audio Recording settings → turn on SuperTranslate
-              </button>
+            <div className="app-picker">
+              <label className="field-label">Capture audio from (macOS)</label>
+              <div className="row">
+                <select
+                  value={s.captureAppPid}
+                  onChange={(e) => {
+                    const pid = Number(e.target.value)
+                    set('captureAppPid', pid)
+                    set('captureAppName', apps.find((a) => a.pid === pid)?.name ?? '')
+                  }}
+                  style={{ flex: 1 }}
+                >
+                  <option value={0}>Whole system (can echo)</option>
+                  {apps.map((a) => (
+                    <option key={a.pid} value={a.pid}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+                <button className="ghost-btn" onClick={refreshApps} title="Refresh app list">
+                  ↻
+                </button>
+              </div>
+              <p className="hint">
+                Pick the app the other person’s voice plays from (Zoom, Teams, your browser).
+                Capturing just that app stops the echo loop. (First use asks for Audio Recording
+                permission — then hit Restart.)
+              </p>
               <button className="link" onClick={() => window.api.relaunchApp()}>
-                2. Restart the app to apply it ↻
+                Restart app ↻
               </button>
-            </>
+            </div>
           )}
           <label className="toggle">
             <input

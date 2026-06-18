@@ -14,6 +14,8 @@ export interface Settings {
   showOriginal: boolean
   captureSystemAudio: boolean
   captureMic: boolean // translate your own microphone (off = incoming-only, avoids bleed)
+  captureAppPid: number // macOS: capture only this app's audio (0 = whole system). No PID = loop-prone.
+  captureAppName: string // display label for the chosen app
   monthlyBudgetUSD: number // hard cap; capture auto-stops when this month's estimated spend hits it
   speakAloud: boolean // speak the other person's translation aloud
   ttsEngine: 'system' | 'elevenlabs' // 'system' = free local voice; 'elevenlabs' = premium
@@ -35,6 +37,8 @@ const defaults: Settings = {
   showOriginal: true,
   captureSystemAudio: true,
   captureMic: true,
+  captureAppPid: 0,
+  captureAppName: '',
   monthlyBudgetUSD: 15,
   speakAloud: false,
   ttsEngine: 'system',

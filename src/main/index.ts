@@ -1,17 +1,10 @@
-import {
-  app,
-  BrowserWindow,
-  session,
-  desktopCapturer,
-  ipcMain,
-  shell,
-  systemPreferences
-} from 'electron'
+import { app, BrowserWindow, session, desktopCapturer, ipcMain, shell } from 'electron'
 import { join } from 'path'
 import { appendFileSync, writeFileSync } from 'fs'
 import { loadSettings, saveSettings, type Settings, type Provider } from './settings'
 import { SonioxSession } from './soniox'
 import { GeminiLiveSession } from './geminiLive'
+import { MacSystemTap, listRunningApps } from './systemAudioMac'
 import { translateStream } from './translate'
 import { elevenLabsTts } from './tts'
 import { getUsage, addStt, addTranslate, addTts, totalUsd } from './usage'
@@ -42,6 +35,8 @@ let win: BrowserWindow | null = null
 const sessions: Record<Source, SonioxSession | GeminiLiveSession | null> = { mic: null, system: null }
 let systemIsGemini = false
 let geminiFinalizeTimer: ReturnType<typeof setTimeout> | null = null
+let macTap: MacSystemTap | null = null
+let lastLevelSent = 0
 let running = false
 let activeSettings: Settings | null = null
 let accrualTimer: ReturnType<typeof setInterval> | null = null
@@ -366,6 +361,8 @@ function stopAccrual(): void {
 }
 
 async function stopAll(): Promise<void> {
+  macTap?.stop()
+  macTap = null
   stopSession('mic')
   stopSession('system')
   stopAccrual()
@@ -407,23 +404,51 @@ ipcMain.handle('capture:start', async () => {
   startAccrual()
   await emitUsage()
 
-  // macOS hands back a SILENT system-audio track if "Screen & System Audio
-  // Recording" isn't granted (no error) — detect that and tell the user clearly.
+  // macOS: capture system audio natively (CoreAudio tap). Capturing ONLY the chosen
+  // app means our own output is never in the stream → no feedback loop. The renderer
+  // does NOT capture system audio on macOS.
   if (process.platform === 'darwin' && s.captureSystemAudio) {
-    try {
-      if (systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
+    macTap = new MacSystemTap(s.captureAppPid || undefined, {
+      onData: (pcm) => {
+        if (!running) return
+        if (!sessions.system) startSession('system', s)
+        sessions.system?.sendAudio(pcm)
+        emitSystemLevel(pcm)
+      },
+      onError: (message) =>
         send('error', {
           source: 'system',
-          message:
-            "Can't hear the other person yet: macOS needs “Screen & System Audio Recording” for SuperTranslate. Open System Settings → Privacy & Security → Screen & System Audio Recording, turn SuperTranslate on, then QUIT and reopen the app. Tip: use headphones so your mic doesn't pick up your speakers."
-        })
-      }
-    } catch {
-      /* ignore */
-    }
+          message: /permission|denied|not allowed|tcc/i.test(message)
+            ? 'System audio needs permission. Open System Settings → Privacy & Security → Audio Recording (or Screen & System Audio Recording), enable SuperTranslate, then use the Restart button.'
+            : `System audio: ${message}`
+        }),
+      onLog: (m) => dbg(`audiotee: ${m}`)
+    })
+    macTap.start().catch((e) =>
+      send('error', { source: 'system', message: `Couldn't start system audio: ${e.message}` })
+    )
+    return { captureSystemInRenderer: false }
   }
-  return { captureSystem: s.captureSystemAudio }
+  // Windows/Linux: the renderer captures system audio via getDisplayMedia.
+  return { captureSystemInRenderer: s.captureSystemAudio }
 })
+
+// RMS level (0..1) from 16-bit PCM, throttled to the renderer for the "Them" dot.
+function emitSystemLevel(pcm: Buffer): void {
+  const now = Date.now()
+  if (now - lastLevelSent < 300) return
+  lastLevelSent = now
+  const n = Math.floor(pcm.length / 2)
+  if (n === 0) return
+  let sum = 0
+  for (let i = 0; i < n; i++) {
+    const v = pcm.readInt16LE(i * 2) / 32768
+    sum += v * v
+  }
+  send('system:level', { rms: Math.sqrt(sum / n) })
+}
+
+ipcMain.handle('apps:list', () => listRunningApps())
 
 ipcMain.on('open-screen-settings', () => {
   shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
