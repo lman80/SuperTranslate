@@ -267,6 +267,10 @@ export default function App() {
       turboLiveTimer.current = setTimeout(() => setTurboStatus('ready'), 1500)
     })
     const offSysLevel = window.api.onSystemLevel(({ rms }) => setSystemLevel(rms))
+    const offSysMode = window.api.onSystemMode(({ mode }) => {
+      if (mode === 'muted') flash('Source app muted — you’ll hear only the translation. ✓')
+      else flash('Capturing this app (browser). Its audio still plays — lower its own volume to reduce overlap.', true)
+    })
     const offStatus = window.api.onStatus(({ source, status }) => {
       if (source !== 'system' || !settingsRef.current?.turboMode) return
       if (status === 'connecting') setTurboStatus('connecting')
@@ -314,6 +318,7 @@ export default function App() {
       offTurbo()
       offStatus()
       offSysLevel()
+      offSysMode()
     }
   }, [flash, speak, guardOn, guardOff, playTurboPcm, turboGuard])
 
@@ -810,17 +815,6 @@ function SettingsPanel({
               onChange={(e) => set('captureMic', e.target.checked)}
             />
             <span>Translate my microphone (your voice). Turn OFF for incoming-only (avoids the mic picking up your speakers).</span>
-          </label>
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={s.duckOthers}
-              onChange={(e) => set('duckOthers', e.target.checked)}
-            />
-            <span>
-              Dim other audio while the translation speaks (macOS). Tip: lowering the source app’s
-              own volume works best.
-            </span>
           </label>
           <label className="toggle">
             <input

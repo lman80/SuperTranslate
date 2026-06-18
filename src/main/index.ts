@@ -1,7 +1,6 @@
 import { app, BrowserWindow, session, desktopCapturer, ipcMain, shell } from 'electron'
 import { join } from 'path'
 import { appendFileSync, writeFileSync } from 'fs'
-import { execFile } from 'child_process'
 import { loadSettings, saveSettings, type Settings, type Provider } from './settings'
 import { SonioxSession } from './soniox'
 import { GeminiLiveSession } from './geminiLive'
@@ -192,10 +191,7 @@ function startGeminiSystemSession(s: Settings): void {
         scheduleFinalize()
         maybeForceFinalize()
       },
-      onAudio: (b64) => {
-        send('turbo:audio', { data: b64 })
-        dipForDub()
-      },
+      onAudio: (b64) => send('turbo:audio', { data: b64 }),
       onTurnComplete: () => {
         dbg('gemini turnComplete')
         finalizeTurn()
@@ -303,7 +299,6 @@ function startSession(source: Source, s: Settings): void {
                 speed: s.ttsRate
               })
               send('tts:play', { id, audioBase64: audio.audioBase64, mime: audio.mime })
-              dipForDub()
               await addTts((audio.chars / 1e6) * ELEVENLABS_USD_PER_MCHAR)
               await emitUsage()
               await checkBudget()
@@ -368,7 +363,6 @@ function stopAccrual(): void {
 }
 
 async function stopAll(): Promise<void> {
-  restoreDuck()
   macTap?.stop()
   macTap = null
   stopSession('mic')
@@ -424,7 +418,7 @@ ipcMain.handle('capture:start', async () => {
       },
       onLevel: (rms) => emitSystemLevel(rms),
       onError: (message) => send('error', { source: 'system', message }),
-      onLog: (m) => dbg(`sck: ${m}`)
+      onMode: (mode) => send('system:mode', { mode })
     })
     macTap.start().catch((e) =>
       send('error', { source: 'system', message: `Couldn't start system audio: ${e.message}` })
@@ -434,38 +428,6 @@ ipcMain.handle('capture:start', async () => {
   // Windows/Linux: the renderer captures system audio via getDisplayMedia.
   return { captureSystemInRenderer: s.captureSystemAudio }
 })
-
-// "Dim other audio while speaking": lower macOS system volume while the dub plays,
-// restore shortly after it stops. (Shares the output, so it dims the dub a bit too.)
-let duckSavedVol: number | null = null
-let duckRestoreTimer: ReturnType<typeof setTimeout> | null = null
-function dipForDub(): void {
-  if (process.platform !== 'darwin' || !activeSettings?.duckOthers) return
-  if (duckSavedVol === null) {
-    duckSavedVol = -1 // mark "dipping" to avoid races
-    execFile('osascript', ['-e', 'output volume of (get volume settings)'], (err, out) => {
-      const cur = parseInt((out || '').trim(), 10)
-      if (err || isNaN(cur)) {
-        duckSavedVol = null
-        return
-      }
-      duckSavedVol = cur
-      execFile('osascript', ['-e', `set volume output volume ${Math.round(cur * 0.3)}`])
-    })
-  }
-  if (duckRestoreTimer) clearTimeout(duckRestoreTimer)
-  duckRestoreTimer = setTimeout(restoreDuck, 900)
-}
-function restoreDuck(): void {
-  if (duckRestoreTimer) {
-    clearTimeout(duckRestoreTimer)
-    duckRestoreTimer = null
-  }
-  if (duckSavedVol !== null && duckSavedVol >= 0 && process.platform === 'darwin') {
-    execFile('osascript', ['-e', `set volume output volume ${duckSavedVol}`])
-  }
-  duckSavedVol = null
-}
 
 // Throttle the captured-audio level to the renderer for the "Them" dot.
 function emitSystemLevel(rms: number): void {

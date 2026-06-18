@@ -50,6 +50,7 @@ const api = {
     subscribe('tts:play', cb),
   onTurboAudio: (cb: (p: { data: string }) => void) => subscribe('turbo:audio', cb),
   onSystemLevel: (cb: (p: { rms: number }) => void) => subscribe('system:level', cb),
+  onSystemMode: (cb: (p: { mode: 'muted' | 'overlap' }) => void) => subscribe('system:mode', cb),
   onBudget: (
     cb: (p: { reached: boolean; warning?: boolean; spent: number; budget: number }) => void
   ) => subscribe('budget', cb),
