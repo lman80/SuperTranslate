@@ -3,6 +3,7 @@ import { join } from 'path'
 import { promises as fs } from 'fs'
 
 export type Provider = 'deepseek' | 'qwen' | 'openrouter'
+export type Dock = 'top-center' | 'bottom-center' | 'top-left' | 'top-right' | 'free'
 
 export interface Settings {
   sonioxApiKey: string
@@ -29,6 +30,9 @@ export interface Settings {
   geminiApiKey: string
   onboarded: boolean // has the user completed (or skipped) first-run setup
   fontScalePref: number // active font scale chosen via A-/A+ (overrides fontScale when set)
+  dock: Dock // overlay docking position on screen
+  overlayBounds?: { x: number; y: number; width: number; height: number } // remembered free-drag position
+  displayId?: number // display the overlay was last on (for multi-monitor restore)
 }
 
 const defaults: Settings = {
@@ -55,7 +59,8 @@ const defaults: Settings = {
   turboMode: false,
   geminiApiKey: '',
   onboarded: false,
-  fontScalePref: 1
+  fontScalePref: 1,
+  dock: 'top-center'
 }
 
 function settingsFile(): string {

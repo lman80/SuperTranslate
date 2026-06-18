@@ -57,6 +57,13 @@ const api = {
 
   windowControl: (action: 'minimize' | 'close' | 'pin' | 'unpin') =>
     ipcRenderer.send('window:control', action),
+  setMode: (
+    mode: 'firstrun' | 'setup' | 'idle' | 'idle-menu' | 'live-collapsed' | 'live-expanded'
+  ) => ipcRenderer.send('window:setMode', mode),
+  setDock: (dock: 'top-center' | 'bottom-center' | 'top-left' | 'top-right' | 'free') =>
+    ipcRenderer.send('window:setDock', dock),
+  setPin: (on: boolean) => ipcRenderer.send('window:setPin', on),
+  onDock: (cb: (p: { dock: string }) => void) => subscribe('window:dock', cb),
   openExternal: (url: string) => ipcRenderer.send('open-external', url),
   openScreenSettings: () => ipcRenderer.send('open-screen-settings'),
   openMicSettings: () => ipcRenderer.send('open-mic-settings'),

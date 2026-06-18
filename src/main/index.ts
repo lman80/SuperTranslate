@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  screen,
   session,
   desktopCapturer,
   ipcMain,
@@ -9,7 +10,7 @@ import {
 } from 'electron'
 import { join } from 'path'
 import { appendFileSync, writeFileSync } from 'fs'
-import { loadSettings, saveSettings, type Settings, type Provider } from './settings'
+import { loadSettings, saveSettings, type Settings, type Provider, type Dock } from './settings'
 import { SonioxSession } from './soniox'
 import { GeminiLiveSession } from './geminiLive'
 import { MacSystemTap, listRunningApps } from './systemAudioMac'
@@ -67,12 +68,115 @@ function dbg(msg: string): void {
 }
 const chunkCounts: Record<Source, number> = { mic: 0, system: 0 }
 
-function createWindow(): void {
+// ---- Overlay window sizing/positioning ----
+// The window is a compact caption overlay that MORPHS between modes; the main process
+// owns all sizing so the window is never bigger than the current mode needs.
+type WinMode = 'firstrun' | 'setup' | 'idle' | 'idle-menu' | 'live-collapsed' | 'live-expanded'
+const MODE_SIZE: Record<WinMode, { w: number; h: number }> = {
+  firstrun: { w: 460, h: 320 },
+  setup: { w: 460, h: 600 },
+  idle: { w: 400, h: 56 },
+  'idle-menu': { w: 400, h: 248 }, // idle pill + an open popover (language / app / engine)
+  'live-collapsed': { w: 600, h: 150 },
+  'live-expanded': { w: 600, h: 400 }
+}
+const BAR_MODES = new Set<WinMode>([
+  'idle',
+  'idle-menu',
+  'live-collapsed',
+  'live-expanded'
+])
+let currentMode: WinMode = 'idle'
+let currentDock: Dock = 'top-center'
+let freeBounds: Settings['overlayBounds']
+let bootDisplayId: number | undefined // last-used display, applied before the window exists
+let suppressMovedUntil = 0
+let movedTimer: ReturnType<typeof setTimeout> | null = null
+
+function activeWorkArea(): Electron.Rectangle {
+  try {
+    if (win && !win.isDestroyed()) {
+      const b = win.getBounds()
+      return screen.getDisplayNearestPoint({ x: b.x + b.width / 2, y: b.y + b.height / 2 }).workArea
+    }
+    // Before the window exists (boot), restore onto the last-used display if it's still attached.
+    if (bootDisplayId != null) {
+      const d = screen.getAllDisplays().find((x) => x.id === bootDisplayId)
+      if (d) return d.workArea
+    }
+  } catch {
+    /* fall through */
+  }
+  return screen.getPrimaryDisplay().workArea
+}
+
+function sizeFor(mode: WinMode): { w: number; h: number } {
+  const wa = activeWorkArea()
+  const base = MODE_SIZE[mode]
+  // Live height is clamped to the display so a short external screen can't push it off.
+  const h = BAR_MODES.has(mode) ? Math.min(base.h, wa.height - 24) : base.h
+  return { w: base.w, h }
+}
+
+function boundsFor(mode: WinMode, dock: Dock): Electron.Rectangle {
+  const { w, h } = sizeFor(mode)
+  const wa = activeWorkArea()
+  // Free drag: keep the user's top-left anchor, clamped on-screen; grows down/right.
+  if (dock === 'free') {
+    const saved = freeBounds
+    const x = saved ? Math.min(Math.max(saved.x, wa.x), wa.x + wa.width - w) : wa.x + (wa.width - w) / 2
+    const y = saved ? Math.min(Math.max(saved.y, wa.y), wa.y + wa.height - h) : wa.y + 8
+    return { x: Math.round(x), y: Math.round(y), width: w, height: h }
+  }
+  const TOP = wa.y + 8
+  const LEFT = wa.x + 12
+  const RIGHT = wa.x + wa.width - w - 12
+  const CENTER = wa.x + (wa.width - w) / 2
+  const BOTTOM = wa.y + wa.height - h - 16
+  const pos: Record<Exclude<Dock, 'free'>, { x: number; y: number }> = {
+    'top-center': { x: CENTER, y: TOP },
+    'top-left': { x: LEFT, y: TOP },
+    'top-right': { x: RIGHT, y: TOP },
+    'bottom-center': { x: CENTER, y: BOTTOM }
+  }
+  const p = pos[dock]
+  return { x: Math.round(p.x), y: Math.round(p.y), width: w, height: h }
+}
+
+// Resize/reposition the window for a mode. Animate only within the bar family
+// (idle <-> live <-> expanded); snap for setup/firstrun to avoid transparent-window flicker.
+function applyMode(mode: WinMode): void {
+  if (!win || win.isDestroyed()) return
+  const animate = BAR_MODES.has(mode) && BAR_MODES.has(currentMode)
+  currentMode = mode
+  const b = boundsFor(mode, currentDock)
+  suppressMovedUntil = Date.now() + 450
+  win.setBounds(b, animate)
+  // NOTE: in 'free' dock we deliberately do NOT overwrite freeBounds here. boundsFor()
+  // re-derives from the user's stored anchor and clamps for the current size each time,
+  // so resizing near a screen edge can't ratchet the saved position. Only a real user
+  // drag (the 'moved' handler) updates freeBounds.
+}
+
+function applyDock(dock: Dock): void {
+  if (!win || win.isDestroyed()) return
+  currentDock = dock
+  void saveSettings({ dock })
+  const b = boundsFor(currentMode, dock)
+  suppressMovedUntil = Date.now() + 450
+  win.setBounds(b, true)
+  send('window:dock', { dock })
+}
+
+function createWindow(boot: { mode: WinMode; dock: Dock }): void {
+  currentMode = boot.mode
+  currentDock = boot.dock
+  const initial = boundsFor(boot.mode, boot.dock)
   win = new BrowserWindow({
-    width: 880,
-    height: 580,
-    minWidth: 520,
-    minHeight: 360,
+    ...initial,
+    minWidth: 300,
+    minHeight: 52,
+    resizable: false,
     show: false,
     frame: false,
     transparent: true,
@@ -89,6 +193,29 @@ function createWindow(): void {
   win.setAlwaysOnTop(true, 'floating')
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   win.once('ready-to-show', () => win?.show())
+
+  // Persist a user drag as a 'free' position (CSS app-region drag doesn't report
+  // coords to JS, so we listen here). Ignore the moves we trigger programmatically.
+  win.on('moved', () => {
+    if (Date.now() < suppressMovedUntil || !win || win.isDestroyed()) return
+    if (movedTimer) clearTimeout(movedTimer)
+    movedTimer = setTimeout(() => {
+      if (!win || win.isDestroyed()) return
+      const b = win.getBounds()
+      // A macOS bounds animation can emit trailing 'moved' events past the suppress
+      // window. If we've landed exactly where the current dock wants us, this was a
+      // programmatic move, NOT a user drag — don't flip the dock to 'free'.
+      if (currentDock !== 'free') {
+        const want = boundsFor(currentMode, currentDock)
+        if (Math.abs(b.x - want.x) < 6 && Math.abs(b.y - want.y) < 6) return
+      }
+      const disp = screen.getDisplayNearestPoint({ x: b.x + b.width / 2, y: b.y + b.height / 2 })
+      currentDock = 'free'
+      freeBounds = b
+      void saveSettings({ dock: 'free', overlayBounds: b, displayId: disp.id })
+      send('window:dock', { dock: 'free' })
+    }, 250)
+  })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
     win.loadURL(process.env['ELECTRON_RENDERER_URL'])
@@ -395,7 +522,12 @@ ipcMain.handle('usage:get', async () => {
 
 ipcMain.handle('capture:start', async () => {
   const s = await loadSettings()
-  if (!s.sonioxApiKey) throw new Error('Add your Soniox API key in Settings first.')
+  // Mode-aware key check (mirrors the renderer's engineReady): Turbo needs only Gemini.
+  if (s.turboMode) {
+    if (!s.geminiApiKey) throw new Error('Add your Gemini API key in Settings first.')
+  } else if (!s.sonioxApiKey) {
+    throw new Error('Add your Soniox API key in Settings first.')
+  }
   if (s.monthlyBudgetUSD > 0 && totalUsd(await getUsage()) >= s.monthlyBudgetUSD) {
     throw new Error('Monthly budget reached. Raise it in Settings to keep going.')
   }
@@ -511,6 +643,15 @@ ipcMain.on('window:control', (_e, action: 'minimize' | 'close' | 'pin' | 'unpin'
   else if (action === 'unpin') win.setAlwaysOnTop(false)
 })
 
+// Overlay morph: the renderer reports its current mode; main resizes the window to fit.
+ipcMain.on('window:setMode', (_e, mode: WinMode) => {
+  if (MODE_SIZE[mode]) applyMode(mode)
+})
+ipcMain.on('window:setDock', (_e, dock: Dock) => applyDock(dock))
+ipcMain.on('window:setPin', (_e, on: boolean) => {
+  if (win && !win.isDestroyed()) win.setAlwaysOnTop(on, 'floating')
+})
+
 ipcMain.on('app:relaunch', () => {
   app.relaunch()
   app.exit(0)
@@ -522,7 +663,7 @@ ipcMain.on('open-external', (_e, url: string) => {
 
 // ---- App lifecycle ----
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // NOTE: do NOT call app.dock.show() — setVisibleOnAllWorkspaces transforms the
   // process so the window floats over all spaces/full-screen apps (and hides the
   // Dock icon). Forcing the Dock icon back disables that float. In-app ✕/Restart
@@ -543,10 +684,15 @@ app.whenReady().then(() => {
     { useSystemPicker: false }
   )
 
-  createWindow()
+  const s = await loadSettings()
+  freeBounds = s.overlayBounds
+  bootDisplayId = s.displayId
+  const dock: Dock = s.dock ?? 'top-center'
+  const bootMode: WinMode = s.onboarded ? 'idle' : 'firstrun'
+  createWindow({ mode: bootMode, dock })
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (BrowserWindow.getAllWindows().length === 0) createWindow({ mode: bootMode, dock })
   })
 })
 

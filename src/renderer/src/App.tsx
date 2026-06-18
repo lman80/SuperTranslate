@@ -3,6 +3,8 @@ import { startCapture, setMicMuted, setSystemMuted, type CaptureResult } from '.
 
 type Source = 'mic' | 'system'
 type Provider = 'deepseek' | 'qwen' | 'openrouter'
+type Dock = 'top-center' | 'bottom-center' | 'top-left' | 'top-right' | 'free'
+type Popover = 'lang' | 'app' | 'engine' | 'dock' | null
 
 interface Settings {
   sonioxApiKey: string
@@ -29,6 +31,7 @@ interface Settings {
   geminiApiKey: string
   onboarded: boolean
   fontScalePref: number
+  dock: Dock
 }
 
 interface Entry {
@@ -38,9 +41,7 @@ interface Entry {
   translation: string
   note?: string
   error?: string
-  sourceLang: string
-  targetLang: string
-  showOrig?: boolean
+  partialText?: string
 }
 interface UsageState {
   spent: number
@@ -52,14 +53,16 @@ interface Banner {
   text: string
   action?: { label: string; fn: () => void }
   dismissable?: boolean
+  ttl?: number // auto-dismiss after N ms (for transient warnings)
 }
 
 const LANG_LABEL: Record<string, string> = {
   en: 'English',
   ko: 'Korean',
   zh: 'Chinese',
-  auto: 'Auto-detect'
+  auto: 'Auto'
 }
+const LANG_SHORT: Record<string, string> = { en: 'EN', ko: 'KO', zh: 'ZH', auto: 'AUTO' }
 const PROVIDER_LABEL: Record<Provider, string> = {
   deepseek: 'DeepSeek',
   qwen: 'Qwen',
@@ -72,6 +75,7 @@ const KEY_URL: Record<Provider, string> = {
   qwen: 'https://bailian.console.alibabacloud.com/?tab=model#/api-key',
   openrouter: 'https://openrouter.ai/keys'
 }
+const FONT_STEPS = [0.9, 1.1, 1.35, 1.6]
 const speakerName = (s: Source): string => (s === 'mic' ? 'You' : 'Them')
 
 // Settings whose change requires re-initializing capture (NOT an app restart).
@@ -92,7 +96,6 @@ const CAPTURE_KEYS = new Set<keyof Settings>([
   'speakAloud'
 ])
 
-// Does the chosen engine have the keys it needs?
 function engineReady(s: Settings): boolean {
   if (s.turboMode) return !!s.geminiApiKey
   return !!s.sonioxApiKey && !!s.translateApiKey
@@ -114,8 +117,9 @@ export default function App() {
   const [turboConnecting, setTurboConnecting] = useState(false)
   const [banners, setBanners] = useState<Record<string, Banner>>({})
   const [toast, setToast] = useState('')
-  const [showSettings, setShowSettings] = useState(false)
-  const [onbStep, setOnbStep] = useState(0)
+  const [setupOpen, setSetupOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [popover, setPopover] = useState<Popover>(null)
 
   const settingsRef = useRef<Settings | null>(null)
   const runningRef = useRef(false)
@@ -132,10 +136,18 @@ export default function App() {
   const ttsGuardTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const turboGuardTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const levelClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const setupOpenRef = useRef(false)
+  const setupDirtyRef = useRef(false) // a capture-affecting setting changed while Setup was open
+  const reinitingRef = useRef(false)
+  const reinitPendingRef = useRef(false)
+  const doStopRef = useRef<(() => Promise<void>) | null>(null)
 
   useEffect(() => {
     runningRef.current = running
   }, [running])
+  useEffect(() => {
+    setupOpenRef.current = setupOpen
+  }, [setupOpen])
   useEffect(() => {
     settingsRef.current = settings
     if (settings) voiceVolumeRef.current = settings.voiceVolume ?? 1
@@ -144,12 +156,9 @@ export default function App() {
   const flash = useCallback((msg: string) => {
     setToast(msg)
     if (toastTimer.current) clearTimeout(toastTimer.current)
-    toastTimer.current = setTimeout(() => setToast(''), 2600)
+    toastTimer.current = setTimeout(() => setToast(''), 2400)
   }, [])
 
-  const addBanner = useCallback((key: string, b: Banner) => {
-    setBanners((prev) => ({ ...prev, [key]: b }))
-  }, [])
   const removeBanner = useCallback((key: string) => {
     setBanners((prev) => {
       if (!(key in prev)) return prev
@@ -158,6 +167,13 @@ export default function App() {
       return n
     })
   }, [])
+  const addBanner = useCallback(
+    (key: string, b: Banner) => {
+      setBanners((prev) => ({ ...prev, [key]: b }))
+      if (b.ttl) setTimeout(() => removeBanner(key), b.ttl)
+    },
+    [removeBanner]
+  )
 
   const refreshPerms = useCallback(() => {
     window.api.getPermissions().then(setPerms).catch(() => undefined)
@@ -167,23 +183,41 @@ export default function App() {
   useEffect(() => {
     window.api.getSettings().then((s) => {
       const st = s as Settings
-      // Migrate already-configured users straight past onboarding.
       if (!st.onboarded && (st.geminiApiKey || st.sonioxApiKey)) {
         window.api.saveSettings({ onboarded: true })
         st.onboarded = true
       }
       setSettings(st)
+      // Force one setMode now that settings are known (the [mode] effect won't re-fire
+      // if the derived mode happens to equal its initial value).
+      window.api.setMode(st.onboarded ? 'idle' : 'firstrun')
     })
     window.api.getUsage().then((u) => setUsage(u as UsageState))
     refreshPerms()
   }, [refreshPerms])
 
-  // Drop always-on-top while settings / onboarding open so macOS prompts aren't hidden.
+  // ---- the window MODE drives the overlay's size (main process resizes to fit) ----
   const onboarding = !!settings && !settings.onboarded
+  const mode = onboarding
+    ? 'firstrun'
+    : setupOpen
+      ? 'setup'
+      : running
+        ? historyOpen
+          ? 'live-expanded'
+          : 'live-collapsed'
+        : popover
+          ? 'idle-menu'
+          : 'idle'
   useEffect(() => {
-    if (showSettings || onboarding) window.api.windowControl('unpin')
-    else window.api.windowControl(pinned ? 'pin' : 'unpin')
-  }, [showSettings, onboarding, pinned])
+    if (settingsRef.current) window.api.setMode(mode)
+  }, [mode])
+
+  // Drop always-on-top while setup/onboarding open so macOS prompts aren't hidden.
+  useEffect(() => {
+    if (setupOpen || onboarding) window.api.setPin(false)
+    else window.api.setPin(pinned)
+  }, [setupOpen, onboarding, pinned])
 
   // ---- TTS voices ----
   useEffect(() => {
@@ -286,15 +320,7 @@ export default function App() {
       setEntries((prev) =>
         [
           ...prev,
-          {
-            id: p.id,
-            source: p.source,
-            original: p.original,
-            translation: '',
-            sourceLang: p.sourceLang,
-            targetLang: p.targetLang,
-            showOrig: settingsRef.current?.showOriginal ?? true
-          }
+          { id: p.id, source: p.source, original: p.original, translation: '' }
         ].slice(-300)
       )
       setPartial((prev) => ({ ...prev, [p.source]: '' }))
@@ -335,16 +361,34 @@ export default function App() {
       }
     })
     const offError = window.api.onError(({ message }) => {
-      // Map known failures to friendly, single-action banners.
       const m = message.toLowerCase()
       if (m.includes('soniox')) {
-        addBanner('err-stt', { kind: 'error', text: 'Speech recognition error — check your Soniox key.', action: { label: 'Settings', fn: () => setShowSettings(true) }, dismissable: true })
+        addBanner('err-stt', {
+          kind: 'error',
+          text: 'Speech recognition error — check your Soniox key.',
+          action: { label: 'Setup', fn: () => setSetupOpen(true) },
+          dismissable: true
+        })
       } else if (m.includes('gemini') || m.includes('turbo')) {
-        addBanner('err-turbo', { kind: 'error', text: message, action: { label: 'Settings', fn: () => setShowSettings(true) }, dismissable: true })
-      } else if (m.includes('screen recording') || m.includes('audio recording') || m.includes('permission')) {
-        addBanner('err-perm', { kind: 'warn', text: message, action: { label: 'Open settings', fn: () => window.api.openScreenSettings() }, dismissable: true })
+        addBanner('err-turbo', {
+          kind: 'error',
+          text: message,
+          action: { label: 'Setup', fn: () => setSetupOpen(true) },
+          dismissable: true
+        })
+      } else if (
+        m.includes('screen recording') ||
+        m.includes('audio recording') ||
+        m.includes('permission')
+      ) {
+        addBanner('err-perm', {
+          kind: 'warn',
+          text: message,
+          action: { label: 'Fix', fn: () => window.api.openScreenSettings() },
+          dismissable: true
+        })
       } else if (m.includes('voice') || m.includes('elevenlabs')) {
-        addBanner('err-voice', { kind: 'warn', text: message, dismissable: true })
+        addBanner('err-voice', { kind: 'warn', text: message, dismissable: true, ttl: 9000 })
       } else {
         addBanner('err-misc', { kind: 'error', text: message, dismissable: true })
       }
@@ -352,17 +396,16 @@ export default function App() {
     const offUsage = window.api.onUsage((u) => setUsage(u))
     const offBudget = window.api.onBudget((b) => {
       if (b.reached) {
-        captureRef.current?.stop()
-        captureRef.current = null
-        setRunning(false)
-        setPartial({ mic: '', system: '' })
+        // Full teardown (closes AudioContext, clears guards, unmutes) — same as Stop.
+        void doStopRef.current?.()
         addBanner('budget', {
           kind: 'warn',
-          text: `Monthly budget of $${b.budget.toFixed(2)} reached — translation paused.`,
-          action: { label: 'Settings', fn: () => setShowSettings(true) }
+          text: `Budget of $${b.budget.toFixed(2)} reached — paused.`,
+          action: { label: 'Setup', fn: () => setSetupOpen(true) },
+          dismissable: true
         })
       } else if (b.warning) {
-        flash(`~$${b.spent.toFixed(2)} of $${b.budget.toFixed(2)} budget used`)
+        flash(`~$${b.spent.toFixed(2)} of $${b.budget.toFixed(2)} used`)
       }
     })
     const offSysLevel = window.api.onSystemLevel(({ rms }) => {
@@ -370,14 +413,16 @@ export default function App() {
       if (levelClearTimer.current) clearTimeout(levelClearTimer.current)
       levelClearTimer.current = setTimeout(() => setSystemLevel(0), 500)
     })
-    const offSysMode = window.api.onSystemMode(({ mode }) => {
-      if (mode === 'muted') flash('Source muted — you’ll hear only the translation ✓')
+    const offSysMode = window.api.onSystemMode(({ mode: m }) => {
+      if (m === 'muted') flash('Source muted — you’ll hear only the translation ✓')
       else flash('Capturing this app — lower its volume to reduce overlap')
     })
     const offStatus = window.api.onStatus(({ source, status }) => {
       if (source !== 'system' || !settingsRef.current?.turboMode) return
-      if (status === 'connecting') setTurboConnecting(true)
-      else setTurboConnecting(false)
+      setTurboConnecting(status === 'connecting')
+    })
+    const offDock = window.api.onDock(({ dock }) => {
+      setSettings((prev) => (prev ? { ...prev, dock: dock as Dock } : prev))
     })
     return () => {
       offPartial()
@@ -391,17 +436,18 @@ export default function App() {
       offSysLevel()
       offSysMode()
       offStatus()
+      offDock()
     }
   }, [flash, speak, guardOn, guardOff, playTurboPcm, turboGuard, addBanner])
 
-  // Auto-scroll only when pinned to bottom.
+  // Auto-scroll the expanded transcript only when pinned to bottom.
   useEffect(() => {
     const el = feedRef.current
     if (el && atBottomRef.current) el.scrollTop = el.scrollHeight
-  }, [entries, partial])
+  }, [entries, partial, historyOpen])
   const onFeedScroll = useCallback(() => {
     const el = feedRef.current
-    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 50
   }, [])
 
   // ---- capture lifecycle ----
@@ -423,9 +469,14 @@ export default function App() {
       captureRef.current = await startCapture({
         captureSystemAudio: !!info?.captureSystemInRenderer,
         captureMic: s.captureMic,
-        onWarning: (msg) => addBanner('warn-cap', { kind: 'warn', text: msg, dismissable: true }),
+        onWarning: (msg) =>
+          addBanner('warn-cap', { kind: 'warn', text: msg, dismissable: true, ttl: 9000 }),
         onSystemLevel: (rms) => setSystemLevel(rms)
       })
+      // A fresh start clears stale issue banners from a previous attempt.
+      ;['err-start', 'err-stt', 'err-turbo', 'err-perm', 'err-voice', 'warn-cap', 'budget'].forEach(
+        removeBanner
+      )
       setRunning(true)
     } catch (e) {
       addBanner('err-start', { kind: 'error', text: (e as Error).message, dismissable: true })
@@ -433,7 +484,7 @@ export default function App() {
     } finally {
       setBusy(false)
     }
-  }, [addBanner])
+  }, [addBanner, removeBanner])
 
   const doStop = useCallback(async () => {
     captureRef.current?.stop()
@@ -454,24 +505,54 @@ export default function App() {
     }
     await window.api.stopCapture().catch(() => undefined)
     setRunning(false)
+    setHistoryOpen(false)
     setTurboConnecting(false)
     setPartial({ mic: '', system: '' })
     setSystemLevel(0)
   }, [])
 
+  // Expose doStop to the (stable) event-subscription effect for budget auto-stop.
+  useEffect(() => {
+    doStopRef.current = doStop
+  }, [doStop])
+
+  // Re-init capture, serialized so rapid changes can't interleave stop/start IPC.
+  const reinitCapture = useCallback(async () => {
+    if (reinitingRef.current) {
+      reinitPendingRef.current = true
+      return
+    }
+    reinitingRef.current = true
+    try {
+      do {
+        reinitPendingRef.current = false
+        await doStop()
+        await doStart()
+      } while (reinitPendingRef.current)
+    } finally {
+      reinitingRef.current = false
+    }
+  }, [doStop, doStart])
+
   const start = useCallback(async () => {
     const s = settingsRef.current
     if (!s) return
     if (!engineReady(s)) {
-      setShowSettings(true)
-      flash('Add your key in Settings to start.')
+      setSetupOpen(true)
+      flash('Add your key in Setup to start.')
+      return
+    }
+    if (!s.captureAppPid) {
+      setPopover('app')
+      flash('Pick the app to listen to.')
       return
     }
     await doStart()
   }, [doStart, flash])
 
-  // Live-apply: save settings, and if a capture-affecting key changed while running,
-  // re-init capture (NOT the whole app).
+  // Live-apply: save settings. If a capture-affecting key changed while running, re-init —
+  // but DEFER that while Setup is open (else every keystroke in a key field would tear down
+  // and restart capture). The deferred re-init runs once when Setup closes.
   const applyLive = useCallback(
     async (patch: Partial<Settings>) => {
       const saved = (await window.api.saveSettings(patch)) as Settings
@@ -479,13 +560,27 @@ export default function App() {
       setSettings(saved)
       const affectsCapture = Object.keys(patch).some((k) => CAPTURE_KEYS.has(k as keyof Settings))
       if (affectsCapture && runningRef.current) {
-        await doStop()
-        await doStart()
-        flash('Applied ✓')
+        if (setupOpenRef.current) {
+          setupDirtyRef.current = true
+        } else {
+          await reinitCapture()
+          flash('Applied ✓')
+        }
       }
     },
-    [doStop, doStart, flash]
+    [reinitCapture, flash]
   )
+
+  const closeSetup = useCallback(() => {
+    setSetupOpen(false)
+    if (setupDirtyRef.current) {
+      setupDirtyRef.current = false
+      if (runningRef.current) {
+        void reinitCapture()
+        flash('Applied ✓')
+      }
+    }
+  }, [reinitCapture, flash])
 
   const setVoiceVolume = useCallback((v: number) => {
     voiceVolumeRef.current = v
@@ -499,116 +594,121 @@ export default function App() {
     setSettings((prev) => (prev ? { ...prev, fontScalePref: clamped } : prev))
     void window.api.saveSettings({ fontScalePref: clamped })
   }, [])
+  const cycleFont = useCallback(() => {
+    const cur = settingsRef.current?.fontScalePref ?? 1
+    const idx = FONT_STEPS.findIndex((s) => Math.abs(s - cur) < 0.08)
+    setFontScale(FONT_STEPS[(idx + 1) % FONT_STEPS.length])
+  }, [setFontScale])
 
-  const togglePin = useCallback(() => {
-    setPinned((p) => {
-      const next = !p
-      window.api.windowControl(next ? 'pin' : 'unpin')
-      return next
-    })
-  }, [])
+  const togglePin = useCallback(() => setPinned((p) => !p), [])
 
-  const runDemo = useCallback(() => {
-    setEntries([
-      { id: 'd1', source: 'system', original: '안녕하세요, 만나서 반갑습니다.', translation: 'Hello, nice to meet you.', sourceLang: 'ko', targetLang: 'en', showOrig: true },
-      { id: 'd2', source: 'mic', original: 'Likewise — shall we start?', translation: '저도요 — 시작할까요?', sourceLang: 'en', targetLang: 'ko', showOrig: true },
-      { id: 'd3', source: 'system', original: '中国人已经习惯了只用手机付钱。', translation: 'People here are used to paying only by phone.', sourceLang: 'zh', targetLang: 'en', showOrig: true }
-    ])
+  const setDock = useCallback((d: Dock) => {
+    window.api.setDock(d)
+    setSettings((prev) => (prev ? { ...prev, dock: d } : prev))
   }, [])
 
   if (!settings) return <div className="boot">Loading…</div>
 
   const fontScale = settings.fontScalePref || settings.fontScale || 1
   const ready = engineReady(settings)
-  const live = running
-  const masterDot = !ready ? 'amber' : live ? 'green' : Object.keys(banners).length ? 'amber' : ''
-  const dir = `${(LANG_LABEL[settings.theirLanguage] ?? settings.theirLanguage).slice(0, 2).toUpperCase()}→${(LANG_LABEL[settings.myLanguage] ?? settings.myLanguage).slice(0, 2).toUpperCase()}`
+  const masterDot = !ready ? 'amber' : running ? 'green' : Object.keys(banners).length ? 'amber' : ''
+  const dir = `${LANG_SHORT[settings.theirLanguage] ?? '··'}→${LANG_SHORT[settings.myLanguage] ?? '··'}`
+
+  const bannerList = Object.entries(banners)
+  const latestBanner = bannerList[bannerList.length - 1]
+
+  // Build the caption cue list (finalized entries + the current live partial).
+  const cues: Entry[] = [...entries]
+  const partialText = partial.system || partial.mic
+  if (partialText) {
+    cues.push({
+      id: '__partial',
+      source: partial.system ? 'system' : 'mic',
+      original: '',
+      translation: '',
+      partialText
+    })
+  }
+
+  const closePopover = (): void => setPopover(null)
 
   return (
     <div className="app" style={{ ['--font-scale' as string]: String(fontScale) }}>
-      <header className="titlebar">
-        <div className="brand">
-          <span className={`dot ${masterDot}`} />
-          <span>SuperTranslate</span>
-        </div>
-        <div className="win-controls">
-          <button className="icon-btn" title="Settings" onClick={() => setShowSettings(true)}>
-            ⚙
-          </button>
-          <button
-            className={`icon-btn ${pinned ? 'active' : ''}`}
-            title={pinned ? 'Keep on top: on' : 'Keep on top: off'}
-            onClick={togglePin}
-          >
-            📌
-          </button>
-          <button className="icon-btn" title="Minimize" onClick={() => window.api.windowControl('minimize')}>
-            –
-          </button>
-          <button className="icon-btn close" title="Quit" onClick={() => window.api.windowControl('close')}>
-            ✕
-          </button>
-        </div>
-      </header>
-
       {onboarding ? (
-        <Onboarding
+        <FirstRun
+          onOpenSetup={() => {
+            void applyLive({ onboarded: true })
+            setSetupOpen(true)
+          }}
+          onSkip={() => void applyLive({ onboarded: true })}
+        />
+      ) : setupOpen ? (
+        <SetupSheet
           settings={settings}
           perms={perms}
-          step={onbStep}
-          setStep={setOnbStep}
+          usage={usage}
+          pinned={pinned}
           applyLive={applyLive}
           refreshPerms={refreshPerms}
-          runDemo={runDemo}
-          onDone={async () => {
-            await applyLive({ onboarded: true })
-            setEntries([])
-          }}
+          togglePin={togglePin}
+          onClose={closeSetup}
         />
       ) : (
-        <>
-          {/* Status strip */}
-          <div className="statusstrip">
-            <span className={`dot ${masterDot}`} />
-            <span>
-              {!ready
-                ? 'Add your key to start'
-                : turboConnecting
-                  ? 'Connecting to Turbo…'
-                  : live
-                    ? 'Listening'
-                    : 'Ready'}
-            </span>
-            {settings.captureAppName && (
-              <>
-                <span className="sep">·</span>
-                <span>{settings.captureAppName}</span>
-              </>
-            )}
-            <span className="sep">·</span>
-            <span>{dir}</span>
-            {usage && (
-              <span className="cost" title="Estimated spend this month">
-                ${usage.spent.toFixed(2)}
-                {usage.budget > 0 ? ` / $${usage.budget.toFixed(0)}` : ''}
-              </span>
-            )}
-          </div>
+        <div className={`bar ${running ? 'live' : 'idle'}`}>
+          {running ? (
+            <LiveControlRow
+              settings={settings}
+              dir={dir}
+              systemLevel={systemLevel}
+              turboConnecting={turboConnecting}
+              historyOpen={historyOpen}
+              onStop={doStop}
+              onToggleMic={() => applyLive({ captureMic: !settings.captureMic })}
+              onToggleOriginal={() => applyLive({ showOriginal: !settings.showOriginal })}
+              onVolume={setVoiceVolume}
+              onFont={cycleFont}
+              onPopover={(p) => setPopover((cur) => (cur === p ? null : p))}
+              onToggleHistory={() => setHistoryOpen((v) => !v)}
+              onSetup={() => setSetupOpen(true)}
+            />
+          ) : (
+            <IdleRow
+              settings={settings}
+              ready={ready}
+              dir={dir}
+              banner={latestBanner}
+              onClearBanner={(k) => removeBanner(k)}
+              onStart={start}
+              busy={busy}
+              onPopover={(p) => setPopover((cur) => (cur === p ? null : p))}
+              onSetup={() => setSetupOpen(true)}
+            />
+          )}
 
-          {/* Banners */}
-          {Object.keys(banners).length > 0 && (
-            <div className="banners">
-              {Object.entries(banners).map(([key, b]) => (
-                <div key={key} className={`banner ${b.kind}`}>
-                  <span className="b-ico">{b.kind === 'error' ? '⚠️' : b.kind === 'good' ? '✓' : '⚠️'}</span>
-                  <span className="b-text">{b.text}</span>
+          {running && (
+            <CaptionStack
+              cues={cues}
+              expanded={historyOpen}
+              showOriginal={settings.showOriginal}
+              feedRef={feedRef}
+              onScroll={onFeedScroll}
+              appName={settings.captureAppName}
+            />
+          )}
+
+          {/* Persistent issue banners (only where there's room: live modes) */}
+          {running && bannerList.length > 0 && (
+            <div className="notices">
+              {bannerList.slice(-2).map(([key, b]) => (
+                <div key={key} className={`notice ${b.kind}`}>
+                  <span className="n-text">{b.text}</span>
                   {b.action && (
-                    <button className="b-btn primary" onClick={b.action.fn}>
+                    <button className="n-btn" onClick={b.action.fn}>
                       {b.action.label}
                     </button>
                   )}
                   {b.dismissable && (
-                    <button className="b-x" onClick={() => removeBanner(key)}>
+                    <button className="n-x" onClick={() => removeBanner(key)}>
                       ✕
                     </button>
                   )}
@@ -617,137 +717,34 @@ export default function App() {
             </div>
           )}
 
-          {/* Activity meter (when live) */}
-          {live && (
-            <div className="activity">
-              <span className="who">Them</span>
-              <LevelMeter level={systemLevel} active={live} />
-            </div>
-          )}
-
-          {/* Main region */}
-          {live || entries.length ? (
-            <main className="main feed" ref={feedRef} onScroll={onFeedScroll}>
-              {entries.map((e) => (
-                <div key={e.id} className={`bubble ${e.source}`}>
-                  <div className="bubble-head">
-                    <span className="who">{speakerName(e.source)}</span>
-                    <button
-                      className="eye"
-                      title="Show/hide original"
-                      onClick={() =>
-                        setEntries((prev) =>
-                          prev.map((x) => (x.id === e.id ? { ...x, showOrig: !x.showOrig } : x))
-                        )
-                      }
-                    >
-                      {e.showOrig ? '👁' : '👁‍🗨'}
-                    </button>
-                  </div>
-                  <div className="translation">
-                    {e.translation ? (
-                      e.translation
-                    ) : e.error ? (
-                      <span style={{ color: 'var(--error)', fontSize: 13 }}>{e.error}</span>
-                    ) : e.note ? (
-                      <span className="dim" style={{ fontSize: 13 }}>
-                        {e.note}
-                      </span>
-                    ) : (
-                      <span className="typing">
-                        <i /> <i /> <i />
-                      </span>
-                    )}
-                  </div>
-                  {e.showOrig && e.original && <div className="original">{e.original}</div>}
-                </div>
-              ))}
-              {(['system', 'mic'] as Source[]).map((src) =>
-                partial[src] ? (
-                  <div key={`p-${src}`} className={`bubble ${src} partial`}>
-                    <div className="bubble-head">
-                      <span className="who">{speakerName(src)}</span>
-                      <span className="dim" style={{ fontSize: 10 }}>
-                        listening…
-                      </span>
-                    </div>
-                    <div className="original live">{partial[src]}</div>
-                  </div>
-                ) : null
+          {popover && (
+            <PopoverShell onClose={closePopover}>
+              {popover === 'lang' && <LanguagePopover settings={settings} applyLive={applyLive} />}
+              {popover === 'app' && (
+                <AppPickerPopover settings={settings} applyLive={applyLive} onPick={closePopover} />
               )}
-              {live && entries.length === 0 && !partial.system && !partial.mic && (
-                <div className="empty">
-                  <div className="empty-emoji">🎧</div>
-                  <p>
-                    Listening to <b>{settings.captureAppName || 'the selected app'}</b>… play some
-                    audio and the translation appears here.
-                  </p>
-                </div>
+              {popover === 'engine' && (
+                <EnginePopover settings={settings} applyLive={applyLive} onPick={closePopover} />
               )}
-            </main>
-          ) : (
-            <IdleScreen
-              settings={settings}
-              ready={ready}
-              perms={perms}
-              applyLive={applyLive}
-              onStart={start}
-              busy={busy}
-              openSettings={() => setShowSettings(true)}
-              runDemo={runDemo}
-            />
+              {popover === 'dock' && (
+                <DockPopover settings={settings} setDock={setDock} onPick={closePopover} />
+              )}
+            </PopoverShell>
           )}
-
-          {/* Control dock when live, else Start is in idle screen */}
-          {live && (
-            <div className="dock">
-              <button className="primary stop" onClick={doStop}>
-                ◼ Stop
-              </button>
-              <div className="vol">
-                <span title="Voice volume">🔊</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={1.5}
-                  step={0.05}
-                  value={settings.voiceVolume}
-                  onChange={(e) => setVoiceVolume(Number(e.target.value))}
-                />
-                <span className="vol-pct">{Math.round(settings.voiceVolume * 100)}%</span>
-              </div>
-              <button className="fontbtn" title="Smaller" onClick={() => setFontScale(fontScale - 0.1)}>
-                A−
-              </button>
-              <button className="fontbtn" title="Larger" onClick={() => setFontScale(fontScale + 0.1)}>
-                A+
-              </button>
-            </div>
-          )}
-        </>
+        </div>
       )}
 
-      {toast && <div className="toast">{toast}</div>}
-
-      {showSettings && (
-        <SettingsPanel
-          settings={settings}
-          perms={perms}
-          applyLive={applyLive}
-          refreshPerms={refreshPerms}
-          onClose={() => setShowSettings(false)}
-        />
-      )}
+      {toast && mode !== 'idle' && <div className="toast">{toast}</div>}
     </div>
   )
 }
 
 /* ============================ Level meter ============================ */
-function LevelMeter({ level, active }: { level: number; active: boolean }) {
-  const N = 22
+function LevelMeter({ level }: { level: number }) {
+  const N = 6
   const lit = Math.round(Math.min(1, level * 7) * N)
   return (
-    <div className={`meter ${active && level > 0.004 ? '' : 'idle'}`}>
+    <div className="meter">
       {Array.from({ length: N }, (_, i) => (
         <div key={i} className={`tick ${i < lit ? 'lit' : ''}`} />
       ))}
@@ -755,90 +752,507 @@ function LevelMeter({ level, active }: { level: number; active: boolean }) {
   )
 }
 
-/* ============================ Idle screen ============================ */
-function IdleScreen({
+/* ============================ Idle row ============================ */
+function IdleRow({
   settings,
   ready,
-  perms,
-  applyLive,
+  dir,
+  banner,
+  onClearBanner,
   onStart,
   busy,
-  openSettings,
-  runDemo
+  onPopover,
+  onSetup
 }: {
   settings: Settings
   ready: boolean
-  perms: { screen: string; microphone: string }
-  applyLive: (p: Partial<Settings>) => void
+  dir: string
+  banner?: [string, Banner]
+  onClearBanner: (key: string) => void
   onStart: () => void
   busy: boolean
-  openSettings: () => void
-  runDemo: () => void
+  onPopover: (p: Popover) => void
+  onSetup: () => void
+}) {
+  // A blocking banner (e.g. budget paused) takes over the slim pill.
+  if (banner) {
+    const [key, b] = banner
+    return (
+      <div className="row idle-row banner-row">
+        <span className={`dot ${b.kind === 'error' ? 'red' : 'amber'}`} />
+        <span className="row-text">{b.text}</span>
+        {b.action && (
+          <button className="mini primary" onClick={b.action.fn}>
+            {b.action.label}
+          </button>
+        )}
+        <button className="mini" onClick={() => onClearBanner(key)}>
+          ✕
+        </button>
+      </div>
+    )
+  }
+  return (
+    <div className="row idle-row">
+      <span className={`dot ${ready ? '' : 'amber'}`} />
+      <span className="row-text" title={settings.captureAppName || undefined}>
+        {settings.captureAppName ? settings.captureAppName : ready ? 'Ready' : 'Add your key'}
+      </span>
+      <button className="badge lang" onClick={() => onPopover('lang')} title="Languages">
+        {dir} ▾
+      </button>
+      {ready ? (
+        <button className="mini primary start" onClick={onStart} disabled={busy}>
+          {busy ? '…' : '▶ Start'}
+        </button>
+      ) : (
+        <button className="mini warnbtn" onClick={onSetup}>
+          ⚙ Finish setup
+        </button>
+      )}
+      <button className="iconbtn" title="Setup" onClick={onSetup}>
+        ⚙
+      </button>
+    </div>
+  )
+}
+
+/* ============================ Live control row ============================ */
+function LiveControlRow({
+  settings,
+  dir,
+  systemLevel,
+  turboConnecting,
+  historyOpen,
+  onStop,
+  onToggleMic,
+  onToggleOriginal,
+  onVolume,
+  onFont,
+  onPopover,
+  onToggleHistory,
+  onSetup
+}: {
+  settings: Settings
+  dir: string
+  systemLevel: number
+  turboConnecting: boolean
+  historyOpen: boolean
+  onStop: () => void
+  onToggleMic: () => void
+  onToggleOriginal: () => void
+  onVolume: (v: number) => void
+  onFont: () => void
+  onPopover: (p: Popover) => void
+  onToggleHistory: () => void
+  onSetup: () => void
+}) {
+  return (
+    <div className="row live-row">
+      <button className="mini stop" onClick={onStop} title="Stop">
+        ◼
+      </button>
+      <span className={`rec ${turboConnecting ? 'connecting' : ''}`} />
+      <LevelMeter level={systemLevel} />
+      <span className="live-dir">{turboConnecting ? 'Connecting…' : dir}</span>
+      <div className="cluster">
+        <button
+          className={`iconbtn ${settings.captureMic ? 'on' : ''}`}
+          title={settings.captureMic ? 'Mic on (translating you)' : 'Mic off (incoming only)'}
+          onClick={onToggleMic}
+        >
+          {settings.captureMic ? '🎙' : '🚫'}
+        </button>
+        <button
+          className={`iconbtn ${settings.showOriginal ? 'on' : ''}`}
+          title="Show original"
+          onClick={onToggleOriginal}
+        >
+          {settings.showOriginal ? '👁' : '⊘'}
+        </button>
+        <div className="vol" title="Voice volume">
+          <span>🔊</span>
+          <input
+            type="range"
+            min={0}
+            max={1.5}
+            step={0.05}
+            value={settings.voiceVolume}
+            onChange={(e) => onVolume(Number(e.target.value))}
+          />
+        </div>
+        <button className="iconbtn" title="Text size" onClick={onFont}>
+          A
+        </button>
+        <button className="iconbtn" title="Source app" onClick={() => onPopover('app')}>
+          🖥
+        </button>
+        <button className="iconbtn" title="Position" onClick={() => onPopover('dock')}>
+          ⤢
+        </button>
+      </div>
+      <button
+        className={`iconbtn ${historyOpen ? 'on' : ''}`}
+        title={historyOpen ? 'Collapse' : 'History'}
+        onClick={onToggleHistory}
+      >
+        {historyOpen ? '⌃' : '⌄'}
+      </button>
+      <button className="iconbtn" title="Setup" onClick={onSetup}>
+        ⚙
+      </button>
+    </div>
+  )
+}
+
+/* ============================ Caption stack ============================ */
+function CaptionStack({
+  cues,
+  expanded,
+  showOriginal,
+  feedRef,
+  onScroll,
+  appName
+}: {
+  cues: Entry[]
+  expanded: boolean
+  showOriginal: boolean
+  feedRef: React.RefObject<HTMLDivElement | null>
+  onScroll: () => void
+  appName: string
+}) {
+  if (cues.length === 0) {
+    return (
+      <div className="capstack empty">
+        <span className="cap-empty">
+          Listening to {appName || 'the selected app'}… play audio to see the translation.
+        </span>
+      </div>
+    )
+  }
+  const shown = expanded ? cues : cues.slice(-2)
+  const lastIdx = shown.length - 1
+  return (
+    <div
+      className={`capstack ${expanded ? 'expanded' : ''}`}
+      ref={feedRef}
+      onScroll={expanded ? onScroll : undefined}
+    >
+      {shown.map((c, i) => (
+        <CaptionCue
+          key={c.id}
+          cue={c}
+          live={i === lastIdx}
+          showOriginal={showOriginal}
+          showWho={expanded}
+        />
+      ))}
+    </div>
+  )
+}
+
+function CaptionCue({
+  cue,
+  live,
+  showOriginal,
+  showWho
+}: {
+  cue: Entry
+  live: boolean
+  showOriginal: boolean
+  showWho: boolean
+}) {
+  return (
+    <div className={`cue ${cue.source} ${live ? 'live' : 'past'}`}>
+      <div className="cue-main">
+        {showWho && <span className="cue-who">{speakerName(cue.source)}</span>}
+        <div className="cue-body">
+          {cue.translation ? (
+            <div className="cue-trans">{cue.translation}</div>
+          ) : cue.error ? (
+            <div className="cue-err">{cue.error}</div>
+          ) : cue.note ? (
+            <div className="cue-note">{cue.note}</div>
+          ) : cue.partialText ? (
+            <div className="cue-trans interim">{cue.partialText}</div>
+          ) : (
+            <div className="typing">
+              <i />
+              <i />
+              <i />
+            </div>
+          )}
+          {showOriginal && cue.original && <div className="cue-orig">{cue.original}</div>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ============================ Popovers ============================ */
+function PopoverShell({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return (
+    <div className="pop-backdrop" onMouseDown={onClose}>
+      <div className="popover" onMouseDown={(e) => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function LanguagePopover({
+  settings,
+  applyLive
+}: {
+  settings: Settings
+  applyLive: (p: Partial<Settings>) => void
+}) {
+  return (
+    <>
+      <div className="pop-head">Languages</div>
+      <div className="pop-langs">
+        <div className="pop-field">
+          <label>They speak</label>
+          <select
+            value={settings.theirLanguage}
+            onChange={(e) => applyLive({ theirLanguage: e.target.value })}
+          >
+            <option value="auto">Auto-detect</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <button
+          className="swap"
+          title="Swap"
+          onClick={() =>
+            applyLive({
+              theirLanguage: settings.myLanguage,
+              myLanguage: settings.theirLanguage === 'auto' ? 'en' : settings.theirLanguage
+            })
+          }
+        >
+          ⇄
+        </button>
+        <div className="pop-field">
+          <label>I speak</label>
+          <select
+            value={settings.myLanguage}
+            onChange={(e) => applyLive({ myLanguage: e.target.value })}
+          >
+            <option value="en">English</option>
+            <option value="ko">Korean</option>
+            <option value="zh">Chinese</option>
+          </select>
+        </div>
+      </div>
+    </>
+  )
+}
+
+function AppPickerPopover({
+  settings,
+  applyLive,
+  onPick
+}: {
+  settings: Settings
+  applyLive: (p: Partial<Settings>) => void
+  onPick: () => void
 }) {
   const [apps, setApps] = useState<{ pid: number; name: string }[]>([])
-  const [pickOpen, setPickOpen] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const load = useCallback(() => {
+    setLoading(true)
+    window.api
+      .listApps()
+      .then((a) => setApps(a))
+      .catch(() => setApps([]))
+      .finally(() => setLoading(false))
+  }, [])
+  useEffect(() => load(), [load])
+  return (
+    <>
+      <div className="pop-head">
+        Listen to which app?
+        <button className="pop-refresh" onClick={load} title="Refresh">
+          ↻
+        </button>
+      </div>
+      <div className="pop-list">
+        {loading && <div className="pop-empty">Loading…</div>}
+        {!loading && apps.length === 0 && <div className="pop-empty">No audio apps found.</div>}
+        {apps.map((a) => (
+          <button
+            key={a.pid}
+            className={`pop-item ${settings.captureAppPid === a.pid ? 'sel' : ''}`}
+            onClick={() => {
+              applyLive({ captureAppPid: a.pid, captureAppName: a.name })
+              onPick()
+            }}
+          >
+            {a.name}
+            {settings.captureAppPid === a.pid && <span className="sel-tick">✓</span>}
+          </button>
+        ))}
+      </div>
+      <div className="pop-foot">Native apps get muted so you hear only the translation.</div>
+    </>
+  )
+}
+
+function EnginePopover({
+  settings,
+  applyLive,
+  onPick
+}: {
+  settings: Settings
+  applyLive: (p: Partial<Settings>) => void
+  onPick: () => void
+}) {
+  return (
+    <>
+      <div className="pop-head">Engine</div>
+      <div className="pop-stack">
+        <button
+          className={`pop-card ${settings.turboMode ? 'sel' : ''}`}
+          onClick={() => {
+            applyLive({ turboMode: true })
+            onPick()
+          }}
+        >
+          <b>⚡ Turbo</b>
+          <span>Instant interpreter voice · ~$1.40/hr</span>
+        </button>
+        <button
+          className={`pop-card ${!settings.turboMode ? 'sel' : ''}`}
+          onClick={() => {
+            applyLive({ turboMode: false })
+            onPick()
+          }}
+        >
+          <b>Standard</b>
+          <span>Soniox + translator · ~$0.12/hr</span>
+        </button>
+      </div>
+    </>
+  )
+}
+
+const DOCKS: { id: Dock; label: string; glyph: string }[] = [
+  { id: 'top-center', label: 'Top', glyph: '▔' },
+  { id: 'top-left', label: 'Top left', glyph: '◤' },
+  { id: 'top-right', label: 'Top right', glyph: '◥' },
+  { id: 'bottom-center', label: 'Bottom', glyph: '▁' }
+]
+function DockPopover({
+  settings,
+  setDock,
+  onPick
+}: {
+  settings: Settings
+  setDock: (d: Dock) => void
+  onPick: () => void
+}) {
+  return (
+    <>
+      <div className="pop-head">Position</div>
+      <div className="pop-docks">
+        {DOCKS.map((d) => (
+          <button
+            key={d.id}
+            className={`dock-btn ${settings.dock === d.id ? 'sel' : ''}`}
+            onClick={() => {
+              setDock(d.id)
+              onPick()
+            }}
+          >
+            <span className="dock-glyph">{d.glyph}</span>
+            {d.label}
+          </button>
+        ))}
+      </div>
+      <div className="pop-foot">Or just drag the bar anywhere.</div>
+    </>
+  )
+}
+
+/* ============================ First run ============================ */
+function FirstRun({ onOpenSetup, onSkip }: { onOpenSetup: () => void; onSkip: () => void }) {
+  return (
+    <div className="firstrun">
+      <div className="fr-emoji">🗣️</div>
+      <h1>SuperTranslate</h1>
+      <p className="fr-sub">Live translation that floats over your call.</p>
+      <ol className="fr-steps">
+        <li>Add your API key</li>
+        <li>Pick the call app</li>
+        <li>Press Start</li>
+      </ol>
+      <div className="fr-actions">
+        <button className="ghost" onClick={onSkip}>
+          Skip for now
+        </button>
+        <button className="primary" onClick={onOpenSetup}>
+          Open Setup
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/* ============================ Setup sheet (one flat page) ============================ */
+function SetupSheet({
+  settings,
+  perms,
+  usage,
+  pinned,
+  applyLive,
+  refreshPerms,
+  togglePin,
+  onClose
+}: {
+  settings: Settings
+  perms: { screen: string; microphone: string }
+  usage: UsageState | null
+  pinned: boolean
+  applyLive: (p: Partial<Settings>) => void
+  refreshPerms: () => void
+  togglePin: () => void
+  onClose: () => void
+}) {
   useEffect(() => {
-    if (pickOpen) window.api.listApps().then(setApps).catch(() => setApps([]))
-  }, [pickOpen])
-  const screenOk = perms.screen === 'granted'
+    refreshPerms()
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [refreshPerms, onClose])
 
   return (
-    <main className="main">
-      <div className="idle">
-        <div className="idle-cards">
-          <button className="idle-card" onClick={() => setPickOpen((v) => !v)}>
-            <div className="ic-label">📞 Source app</div>
-            <div className="ic-value">{settings.captureAppName || 'Pick an app'}</div>
-            <div className="ic-sub">{settings.captureAppName ? 'tap to change' : 'who you’re calling on'}</div>
-          </button>
-          <button className="idle-card" onClick={openSettings}>
-            <div className="ic-label">🌐 Languages</div>
-            <div className="ic-value">
-              {(LANG_LABEL[settings.theirLanguage] ?? settings.theirLanguage)} →{' '}
-              {LANG_LABEL[settings.myLanguage] ?? settings.myLanguage}
-            </div>
-            <div className="ic-sub">tap to change</div>
-          </button>
-        </div>
-
-        {pickOpen && (
-          <div>
-            <select
-              value={settings.captureAppPid}
-              onChange={(e) => {
-                const pid = Number(e.target.value)
-                applyLive({ captureAppPid: pid, captureAppName: apps.find((a) => a.pid === pid)?.name ?? '' })
-                setPickOpen(false)
-              }}
-            >
-              <option value={0}>— pick an app —</option>
-              {settings.captureAppPid > 0 && !apps.some((a) => a.pid === settings.captureAppPid) && (
-                <option value={settings.captureAppPid}>{settings.captureAppName || `PID ${settings.captureAppPid}`}</option>
-              )}
-              {apps.map((a) => (
-                <option key={a.pid} value={a.pid}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-            <p className="hint">
-              Pick the app the other person’s voice plays from. Native apps (Zoom/Teams) get muted
-              so you hear only the translation; browsers keep playing.
-            </p>
-          </div>
-        )}
-
-        <div className="engine-row">
-          <div className="er-head">
-            <span className="er-label">Engine</span>
-            <span className="er-cost">{settings.turboMode ? '≈ $1.40/hr' : '≈ $0.12/hr'}</span>
-          </div>
+    <div className="setup">
+      <div className="setup-head">
+        <h2>Setup</h2>
+        <button className="iconbtn" onClick={onClose} title="Done">
+          ✕
+        </button>
+      </div>
+      <div className="setup-body">
+        <Section title="Engine">
           <div className="seg">
             <button
               className={settings.turboMode ? 'on turbo' : ''}
               onClick={() => applyLive({ turboMode: true })}
             >
-              ⚡ Turbo (instant)
+              ⚡ Turbo
             </button>
             <button
               className={!settings.turboMode ? 'on' : ''}
@@ -847,237 +1261,257 @@ function IdleScreen({
               Standard
             </button>
           </div>
-        </div>
+          <p className="hint">
+            {settings.turboMode
+              ? 'One key. Instant interpreter voice. ~$1.40/hr.'
+              : 'Two keys (Soniox + a translator). Cheaper per hour.'}
+          </p>
+        </Section>
 
-        <div className="chips">
-          <span className={`chip ${ready ? 'ok' : 'warn'}`}>{ready ? 'Key ✓' : 'Key needed'}</span>
-          <span className={`chip ${screenOk ? 'ok' : 'warn'}`}>
-            {screenOk ? 'Audio permission ✓' : 'Permission needed'}
-          </span>
-          <span className="chip">{settings.captureMic ? 'Mic on' : 'Incoming-only'}</span>
-        </div>
+        <Section title="API keys">
+          {settings.turboMode ? (
+            <Field label="Gemini key">
+              <input
+                type="password"
+                placeholder="Paste your Gemini key"
+                value={settings.geminiApiKey}
+                onChange={(e) => applyLive({ geminiApiKey: e.target.value.trim() })}
+              />
+              <button className="link" onClick={() => window.api.openExternal(GEMINI_KEYS_URL)}>
+                Get a Gemini key →
+              </button>
+            </Field>
+          ) : (
+            <>
+              <Field label="Soniox key (speech)">
+                <input
+                  type="password"
+                  placeholder="Paste your Soniox key"
+                  value={settings.sonioxApiKey}
+                  onChange={(e) => applyLive({ sonioxApiKey: e.target.value.trim() })}
+                />
+                <button className="link" onClick={() => window.api.openExternal(SONIOX_KEYS_URL)}>
+                  Get a Soniox key →
+                </button>
+              </Field>
+              <Field label="Translator">
+                <div className="seg sm">
+                  {(['deepseek', 'qwen', 'openrouter'] as Provider[]).map((p) => (
+                    <button
+                      key={p}
+                      className={settings.translateProvider === p ? 'on' : ''}
+                      onClick={() => applyLive({ translateProvider: p })}
+                    >
+                      {PROVIDER_LABEL[p]}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="password"
+                  placeholder={`${PROVIDER_LABEL[settings.translateProvider]} key`}
+                  value={settings.translateApiKey}
+                  onChange={(e) => applyLive({ translateApiKey: e.target.value.trim() })}
+                  style={{ marginTop: 8 }}
+                />
+                <button
+                  className="link"
+                  onClick={() => window.api.openExternal(KEY_URL[settings.translateProvider])}
+                >
+                  Get a {PROVIDER_LABEL[settings.translateProvider]} key →
+                </button>
+              </Field>
+            </>
+          )}
+        </Section>
 
-        {ready && screenOk && settings.captureAppPid ? (
-          <button className="primary full" onClick={onStart} disabled={busy}>
-            {busy ? 'Starting…' : '● Start translating'}
+        <Section title="Languages">
+          <div className="row2">
+            <Field label="They speak">
+              <select
+                value={settings.theirLanguage}
+                onChange={(e) => applyLive({ theirLanguage: e.target.value })}
+              >
+                <option value="auto">Auto-detect</option>
+                <option value="ko">Korean</option>
+                <option value="zh">Chinese</option>
+                <option value="en">English</option>
+              </select>
+            </Field>
+            <Field label="I speak">
+              <select
+                value={settings.myLanguage}
+                onChange={(e) => applyLive({ myLanguage: e.target.value })}
+              >
+                <option value="en">English</option>
+                <option value="ko">Korean</option>
+                <option value="zh">Chinese</option>
+              </select>
+            </Field>
+          </div>
+        </Section>
+
+        <Section title="Voice">
+          <Toggle
+            checked={settings.speakAloud}
+            onChange={(v) => applyLive({ speakAloud: v })}
+            label="Speak the translation aloud (Turbo always speaks)"
+          />
+          <div className="seg sm" style={{ marginTop: 8 }}>
+            <button
+              className={settings.ttsEngine === 'system' ? 'on' : ''}
+              onClick={() => applyLive({ ttsEngine: 'system' })}
+            >
+              Built-in (free)
+            </button>
+            <button
+              className={settings.ttsEngine === 'elevenlabs' ? 'on' : ''}
+              onClick={() => applyLive({ ttsEngine: 'elevenlabs' })}
+            >
+              ElevenLabs (HD)
+            </button>
+          </div>
+          {settings.ttsEngine === 'elevenlabs' && (
+            <>
+              <input
+                type="password"
+                placeholder="ElevenLabs key"
+                value={settings.elevenLabsApiKey}
+                onChange={(e) => applyLive({ elevenLabsApiKey: e.target.value.trim() })}
+                style={{ marginTop: 8 }}
+              />
+              <input
+                type="text"
+                placeholder="Voice ID (optional)"
+                value={settings.elevenLabsVoiceId}
+                onChange={(e) => applyLive({ elevenLabsVoiceId: e.target.value.trim() })}
+                style={{ marginTop: 8 }}
+              />
+            </>
+          )}
+          <label className="slabel">Talking speed {settings.ttsRate.toFixed(2)}×</label>
+          <input
+            type="range"
+            min={0.8}
+            max={1.6}
+            step={0.05}
+            value={settings.ttsRate}
+            onChange={(e) => applyLive({ ttsRate: Number(e.target.value) })}
+          />
+          <label className="slabel">Voice volume {Math.round(settings.voiceVolume * 100)}%</label>
+          <input
+            type="range"
+            min={0}
+            max={1.5}
+            step={0.05}
+            value={settings.voiceVolume}
+            onChange={(e) => applyLive({ voiceVolume: Number(e.target.value) })}
+          />
+        </Section>
+
+        <Section title="Audio & display">
+          <Toggle
+            checked={settings.captureMic}
+            onChange={(v) => applyLive({ captureMic: v })}
+            label="Translate my microphone too (off avoids the Bluetooth call-quality drop)"
+          />
+          <Toggle
+            checked={settings.showOriginal}
+            onChange={(v) => applyLive({ showOriginal: v })}
+            label="Show the original text under each translation"
+          />
+          <Toggle checked={pinned} onChange={togglePin} label="Keep window on top" />
+        </Section>
+
+        <Section title="Permissions">
+          <PermissionRow
+            icon="🖥️"
+            title="Screen & System Audio"
+            sub="Lets SuperTranslate hear the other app."
+            status={perms.screen}
+            onGrant={() => window.api.openScreenSettings()}
+            onRefresh={refreshPerms}
+            needsRelaunch
+          />
+          {settings.captureMic && (
+            <PermissionRow
+              icon="🎙️"
+              title="Microphone"
+              sub="Needed because ‘translate me’ is on."
+              status={perms.microphone}
+              onGrant={async () => {
+                await window.api.askMicPermission()
+                refreshPerms()
+              }}
+              onRefresh={refreshPerms}
+            />
+          )}
+        </Section>
+
+        <Section title="Budget">
+          <div className="brow">
+            <span>$</span>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              value={settings.monthlyBudgetUSD}
+              onChange={(e) => applyLive({ monthlyBudgetUSD: Math.max(0, Number(e.target.value)) })}
+              style={{ width: 90 }}
+            />
+            <span className="dim">/ month cap</span>
+            {usage && <span className="dim spent">· ${usage.spent.toFixed(2)} used</span>}
+          </div>
+          <p className="hint">Stops automatically at this limit. 0 = no cap.</p>
+        </Section>
+
+        <div className="setup-footer">
+          <button className="link" onClick={() => applyLive({ onboarded: false })}>
+            Replay welcome
           </button>
-        ) : (
-          <button className="ghost-btn" style={{ width: '100%' }} onClick={openSettings}>
-            {!ready ? 'Add your key →' : !screenOk ? 'Grant audio permission →' : 'Pick a source app →'}
+          <button className="link danger" onClick={() => window.api.windowControl('close')}>
+            Quit app
           </button>
-        )}
-        <button className="link" style={{ alignSelf: 'center' }} onClick={runDemo}>
-          See a demo
+        </div>
+      </div>
+      <div className="setup-done">
+        <button className="primary full" onClick={onClose}>
+          Done
         </button>
       </div>
-    </main>
+    </div>
   )
 }
 
-/* ============================ Onboarding ============================ */
-function Onboarding({
-  settings,
-  perms,
-  step,
-  setStep,
-  applyLive,
-  refreshPerms,
-  runDemo,
-  onDone
-}: {
-  settings: Settings
-  perms: { screen: string; microphone: string }
-  step: number
-  setStep: (n: number) => void
-  applyLive: (p: Partial<Settings>) => void
-  refreshPerms: () => void
-  runDemo: () => void
-  onDone: () => void
-}) {
-  const TOTAL = 5
-  const next = () => setStep(Math.min(TOTAL, step + 1))
-  const back = () => setStep(Math.max(0, step - 1))
-
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <main className="main">
-      <div className="onb">
-        <div className="onb-rail">
-          {Array.from({ length: TOTAL + 1 }, (_, i) => (
-            <span key={i} className={`d ${i <= step ? 'on' : ''}`} />
-          ))}
-        </div>
-
-        {step === 0 && (
-          <>
-            <div className="onb-emoji">🌐</div>
-            <h1>Live translation for your calls</h1>
-            <p className="sub">See and hear the other person in your language — in real time.</p>
-            <div className="onb-actions">
-              <button className="link" onClick={onDone}>
-                Skip setup
-              </button>
-              <span className="spacer" />
-              <button
-                className="ghost-btn"
-                onClick={() => {
-                  runDemo()
-                  next()
-                }}
-              >
-                See a demo
-              </button>
-              <button className="primary" onClick={next}>
-                Get started
-              </button>
-            </div>
-          </>
-        )}
-
-        {step === 1 && (
-          <>
-            <h1>Languages</h1>
-            <p className="sub">We’ll detect their language and translate to yours.</p>
-            <section>
-              <label className="field-label">They speak</label>
-              <select value={settings.theirLanguage} onChange={(e) => applyLive({ theirLanguage: e.target.value })}>
-                <option value="auto">Auto-detect (Korean · Chinese · English)</option>
-                <option value="ko">Korean</option>
-                <option value="zh">Chinese</option>
-                <option value="en">English</option>
-              </select>
-            </section>
-            <section>
-              <label className="field-label">I speak</label>
-              <select value={settings.myLanguage} onChange={(e) => applyLive({ myLanguage: e.target.value })}>
-                <option value="en">English</option>
-                <option value="ko">Korean</option>
-                <option value="zh">Chinese</option>
-              </select>
-            </section>
-            <label className="toggle">
-              <input type="checkbox" checked={settings.captureMic} onChange={(e) => applyLive({ captureMic: e.target.checked })} />
-              <span>Also translate me (for two-way, in-person). Off is best for calls and avoids the Bluetooth call-quality drop.</span>
-            </label>
-            <div className="onb-actions">
-              <button className="link" onClick={back}>Back</button>
-              <span className="spacer" />
-              <button className="primary" onClick={next}>Next</button>
-            </div>
-          </>
-        )}
-
-        {step === 2 && (
-          <>
-            <h1>Choose how it translates</h1>
-            <p className="sub">You can switch anytime.</p>
-            <button className={`bigcard ${settings.turboMode ? 'sel' : ''}`} onClick={() => applyLive({ turboMode: true })}>
-              <div className="bc-title">
-                ⚡ Turbo <span className="bc-rec">Easiest</span>
-              </div>
-              <div className="bc-desc">One key. Instant interpreter voice. ~$1.40/hour.</div>
-            </button>
-            <button className={`bigcard ${!settings.turboMode ? 'sel' : ''}`} onClick={() => applyLive({ turboMode: false })}>
-              <div className="bc-title">Standard</div>
-              <div className="bc-desc">Two keys (Soniox + a translator). Cheaper per hour, more control.</div>
-            </button>
-            <div className="onb-actions">
-              <button className="link" onClick={back}>Back</button>
-              <span className="spacer" />
-              <button className="primary" onClick={next}>Next</button>
-            </div>
-          </>
-        )}
-
-        {step === 3 && (
-          <>
-            <h1>Permissions</h1>
-            <p className="sub">macOS needs your OK to hear the call. Prompts appear in front now.</p>
-            <PermissionRow
-              icon="🖥️"
-              title="Screen & System Audio Recording"
-              sub="Lets SuperTranslate hear the other person’s app."
-              status={perms.screen}
-              onGrant={() => window.api.openScreenSettings()}
-              onRefresh={refreshPerms}
-              needsRelaunch
-            />
-            {settings.captureMic && (
-              <PermissionRow
-                icon="🎙️"
-                title="Microphone"
-                sub="Only needed because you turned on ‘translate me’."
-                status={perms.microphone}
-                onGrant={async () => {
-                  await window.api.askMicPermission()
-                  refreshPerms()
-                }}
-                onRefresh={refreshPerms}
-              />
-            )}
-            <div className="onb-actions">
-              <button className="link" onClick={back}>Back</button>
-              <span className="spacer" />
-              <button className="primary" onClick={next}>Next</button>
-            </div>
-          </>
-        )}
-
-        {step === 4 && (
-          <>
-            <h1>Add your key</h1>
-            {settings.turboMode ? (
-              <section>
-                <label className="field-label">Gemini API key</label>
-                <input
-                  type="password"
-                  placeholder="Paste your Gemini key"
-                  value={settings.geminiApiKey}
-                  onChange={(e) => applyLive({ geminiApiKey: e.target.value.trim() })}
-                />
-                <button className="link" onClick={() => window.api.openExternal(GEMINI_KEYS_URL)}>
-                  Get a Gemini key →
-                </button>
-                {settings.geminiApiKey && <div className="keyok">Saved ✓ (validated when you Start)</div>}
-                <p className="field-why">Gemini turns the other person’s speech directly into a voice in your language.</p>
-              </section>
-            ) : (
-              <>
-                <section>
-                  <label className="field-label">Soniox key (speech)</label>
-                  <input type="password" placeholder="Paste your Soniox key" value={settings.sonioxApiKey} onChange={(e) => applyLive({ sonioxApiKey: e.target.value.trim() })} />
-                  <button className="link" onClick={() => window.api.openExternal(SONIOX_KEYS_URL)}>Get a Soniox key →</button>
-                </section>
-                <section>
-                  <label className="field-label">{PROVIDER_LABEL[settings.translateProvider]} key (translation)</label>
-                  <input type="password" placeholder={`Paste your ${PROVIDER_LABEL[settings.translateProvider]} key`} value={settings.translateApiKey} onChange={(e) => applyLive({ translateApiKey: e.target.value.trim() })} />
-                  <button className="link" onClick={() => window.api.openExternal(KEY_URL[settings.translateProvider])}>Get a {PROVIDER_LABEL[settings.translateProvider]} key →</button>
-                </section>
-              </>
-            )}
-            <div className="onb-actions">
-              <button className="link" onClick={back}>Back</button>
-              <span className="spacer" />
-              <button className="primary" onClick={next}>Next</button>
-            </div>
-          </>
-        )}
-
-        {step === 5 && (
-          <>
-            <div className="onb-emoji">✅</div>
-            <h1>You’re ready</h1>
-            <p className="sub">Open the call app you’ll use, then start translating from the main screen.</p>
-            <div className="onb-actions">
-              <button className="link" onClick={back}>Back</button>
-              <span className="spacer" />
-              <button className="primary" onClick={onDone}>
-                Finish
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-    </main>
+    <section className="sec">
+      <div className="sec-title">{title}</div>
+      {children}
+    </section>
+  )
+}
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="field">
+      <label className="slabel">{label}</label>
+      {children}
+    </div>
+  )
+}
+function Toggle({
+  checked,
+  onChange,
+  label
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  label: string
+}) {
+  return (
+    <label className="toggle">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span>{label}</span>
+    </label>
   )
 }
 
@@ -1108,233 +1542,23 @@ function PermissionRow({
       </div>
       {granted ? (
         needsRelaunch ? (
-          <button className="b-btn primary" onClick={() => window.api.relaunchApp()}>
-            Relaunch to apply
+          <button className="mini" onClick={() => window.api.relaunchApp()}>
+            Relaunch
           </button>
         ) : (
           <span className="pstate ok">Granted ✓</span>
         )
       ) : (
-        <>
-          <button className="ghost-btn" style={{ padding: '6px 10px' }} onClick={() => { onGrant(); setTimeout(onRefresh, 1500) }}>
-            Grant
-          </button>
-        </>
+        <button
+          className="mini"
+          onClick={() => {
+            onGrant()
+            setTimeout(onRefresh, 1500)
+          }}
+        >
+          Grant
+        </button>
       )}
-    </div>
-  )
-}
-
-/* ============================ Settings ============================ */
-function SettingsPanel({
-  settings,
-  perms,
-  applyLive,
-  refreshPerms,
-  onClose
-}: {
-  settings: Settings
-  perms: { screen: string; microphone: string }
-  applyLive: (p: Partial<Settings>) => void
-  refreshPerms: () => void
-  onClose: () => void
-}) {
-  const [tab, setTab] = useState<'setup' | 'audio' | 'voice' | 'advanced'>('setup')
-  const [apps, setApps] = useState<{ pid: number; name: string }[]>([])
-  const refreshApps = useCallback(() => window.api.listApps().then(setApps).catch(() => setApps([])), [])
-  useEffect(() => {
-    refreshApps()
-    refreshPerms()
-  }, [refreshApps, refreshPerms])
-
-  return (
-    <div className="settings-backdrop" onMouseDown={onClose}>
-      <div className="settings" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="settings-head">
-          <h2>Settings</h2>
-          <button className="icon-btn" onClick={onClose}>✕</button>
-        </div>
-        <div className="tabs">
-          {(['setup', 'audio', 'voice', 'advanced'] as const).map((t) => (
-            <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>
-              {t[0].toUpperCase() + t.slice(1)}
-            </button>
-          ))}
-        </div>
-        <div className="settings-body">
-          {tab === 'setup' && (
-            <>
-              <section className="row">
-                <div style={{ flex: 1 }}>
-                  <label className="field-label">They speak</label>
-                  <select value={settings.theirLanguage} onChange={(e) => applyLive({ theirLanguage: e.target.value })}>
-                    <option value="auto">Auto-detect</option>
-                    <option value="ko">Korean</option>
-                    <option value="zh">Chinese</option>
-                    <option value="en">English</option>
-                  </select>
-                </div>
-                <div style={{ flex: 1 }}>
-                  <label className="field-label">I speak</label>
-                  <select value={settings.myLanguage} onChange={(e) => applyLive({ myLanguage: e.target.value })}>
-                    <option value="en">English</option>
-                    <option value="ko">Korean</option>
-                    <option value="zh">Chinese</option>
-                  </select>
-                </div>
-              </section>
-              <section>
-                <label className="field-label">Engine</label>
-                <div className="seg">
-                  <button className={settings.turboMode ? 'on turbo' : ''} onClick={() => applyLive({ turboMode: true })}>⚡ Turbo</button>
-                  <button className={!settings.turboMode ? 'on' : ''} onClick={() => applyLive({ turboMode: false })}>Standard</button>
-                </div>
-              </section>
-              {settings.turboMode ? (
-                <section>
-                  <label className="field-label">Gemini key</label>
-                  <input type="password" placeholder="Paste your Gemini key" value={settings.geminiApiKey} onChange={(e) => applyLive({ geminiApiKey: e.target.value.trim() })} />
-                  <button className="link" onClick={() => window.api.openExternal(GEMINI_KEYS_URL)}>Get a Gemini key →</button>
-                </section>
-              ) : (
-                <>
-                  <section>
-                    <label className="field-label">Soniox key (speech)</label>
-                    <input type="password" placeholder="Soniox key" value={settings.sonioxApiKey} onChange={(e) => applyLive({ sonioxApiKey: e.target.value.trim() })} />
-                    <button className="link" onClick={() => window.api.openExternal(SONIOX_KEYS_URL)}>Get a Soniox key →</button>
-                  </section>
-                  <section>
-                    <label className="field-label">Translation engine</label>
-                    <div className="seg">
-                      {(['deepseek', 'qwen', 'openrouter'] as Provider[]).map((p) => (
-                        <button key={p} className={settings.translateProvider === p ? 'on' : ''} onClick={() => applyLive({ translateProvider: p })}>
-                          {PROVIDER_LABEL[p]}
-                        </button>
-                      ))}
-                    </div>
-                    <input type="password" placeholder={`${PROVIDER_LABEL[settings.translateProvider]} key`} value={settings.translateApiKey} onChange={(e) => applyLive({ translateApiKey: e.target.value.trim() })} style={{ marginTop: 8 }} />
-                    <button className="link" onClick={() => window.api.openExternal(KEY_URL[settings.translateProvider])}>Get a {PROVIDER_LABEL[settings.translateProvider]} key →</button>
-                  </section>
-                </>
-              )}
-              <section>
-                <label className="field-label">Monthly spending limit (safety cap)</label>
-                <div className="row">
-                  <span>$</span>
-                  <input type="number" min={0} step={1} value={settings.monthlyBudgetUSD} onChange={(e) => applyLive({ monthlyBudgetUSD: Math.max(0, Number(e.target.value)) })} style={{ width: 100 }} />
-                  <span className="dim">/ month</span>
-                </div>
-                <p className="hint">Stops automatically at this limit. 0 = no cap. DeepSeek/Gemini/OpenRouter are prepaid too.</p>
-              </section>
-            </>
-          )}
-
-          {tab === 'audio' && (
-            <>
-              <section>
-                <label className="field-label">Capture audio from (macOS)</label>
-                <div className="row">
-                  <select
-                    value={settings.captureAppPid}
-                    onChange={(e) => {
-                      const pid = Number(e.target.value)
-                      applyLive({ captureAppPid: pid, captureAppName: apps.find((a) => a.pid === pid)?.name ?? '' })
-                    }}
-                    style={{ flex: 1 }}
-                  >
-                    <option value={0}>— pick an app —</option>
-                    {settings.captureAppPid > 0 && !apps.some((a) => a.pid === settings.captureAppPid) && (
-                      <option value={settings.captureAppPid}>{settings.captureAppName || `PID ${settings.captureAppPid}`}</option>
-                    )}
-                    {apps.map((a) => (
-                      <option key={a.pid} value={a.pid}>{a.name}</option>
-                    ))}
-                  </select>
-                  <button className="ghost-btn" onClick={refreshApps} title="Refresh">↻</button>
-                </div>
-                <p className="hint">Native apps (Zoom/Teams) are muted so you hear only the translation. Browsers keep playing (lower their own volume).</p>
-              </section>
-              <section>
-                <label className="toggle">
-                  <input type="checkbox" checked={settings.captureMic} onChange={(e) => applyLive({ captureMic: e.target.checked })} />
-                  <span>Translate my microphone (your voice). Off avoids the Bluetooth call-quality drop.</span>
-                </label>
-              </section>
-              <section>
-                <label className="field-label">Response speed</label>
-                <div className="seg">
-                  {(['fast', 'balanced', 'accurate'] as const).map((r) => (
-                    <button key={r} className={settings.responseSpeed === r ? 'on' : ''} onClick={() => applyLive({ responseSpeed: r })}>
-                      {r[0].toUpperCase() + r.slice(1)}
-                    </button>
-                  ))}
-                </div>
-                <p className="hint">Fast = snappier but may split a slow sentence; Accurate = waits for whole sentences.</p>
-              </section>
-            </>
-          )}
-
-          {tab === 'voice' && (
-            <>
-              <section>
-                <label className="toggle">
-                  <input type="checkbox" checked={settings.speakAloud} onChange={(e) => applyLive({ speakAloud: e.target.checked })} />
-                  <span>Speak the translation aloud (Turbo always speaks)</span>
-                </label>
-              </section>
-              <section>
-                <label className="field-label">Voice</label>
-                <div className="seg">
-                  <button className={settings.ttsEngine === 'system' ? 'on' : ''} onClick={() => applyLive({ ttsEngine: 'system' })}>Built-in (free)</button>
-                  <button className={settings.ttsEngine === 'elevenlabs' ? 'on' : ''} onClick={() => applyLive({ ttsEngine: 'elevenlabs' })}>ElevenLabs (HD)</button>
-                </div>
-                {settings.ttsEngine === 'elevenlabs' && (
-                  <>
-                    <input type="password" placeholder="ElevenLabs key" value={settings.elevenLabsApiKey} onChange={(e) => applyLive({ elevenLabsApiKey: e.target.value.trim() })} style={{ marginTop: 8 }} />
-                    <input type="text" placeholder="Voice ID (optional)" value={settings.elevenLabsVoiceId} onChange={(e) => applyLive({ elevenLabsVoiceId: e.target.value.trim() })} style={{ marginTop: 8 }} />
-                    <button className="link" onClick={() => window.api.openExternal('https://elevenlabs.io/app/settings/api-keys')}>Get an ElevenLabs key →</button>
-                    <p className="hint">~$0.10 / 1,000 characters. Caps at 1.2× speed.</p>
-                  </>
-                )}
-              </section>
-              <section>
-                <label className="field-label">Talking speed {settings.ttsRate.toFixed(2)}×</label>
-                <input type="range" min={0.8} max={1.6} step={0.05} value={settings.ttsRate} onChange={(e) => applyLive({ ttsRate: Number(e.target.value) })} />
-                <p className="hint">Built-in voice up to 1.6×; ElevenLabs caps at 1.2×.</p>
-              </section>
-              <section>
-                <label className="field-label">Voice volume {Math.round(settings.voiceVolume * 100)}%</label>
-                <input type="range" min={0} max={1.5} step={0.05} value={settings.voiceVolume} onChange={(e) => applyLive({ voiceVolume: Number(e.target.value) })} />
-              </section>
-            </>
-          )}
-
-          {tab === 'advanced' && (
-            <>
-              <section>
-                <label className="toggle">
-                  <input type="checkbox" checked={settings.showOriginal} onChange={(e) => applyLive({ showOriginal: e.target.checked })} />
-                  <span>Show the original text under each translation by default</span>
-                </label>
-              </section>
-              <section>
-                <label className="field-label">Permissions</label>
-                <PermissionRow icon="🖥️" title="Screen & System Audio Recording" sub="Hear the other app." status={perms.screen} onGrant={() => window.api.openScreenSettings()} onRefresh={refreshPerms} needsRelaunch />
-                {settings.captureMic && (
-                  <PermissionRow icon="🎙️" title="Microphone" sub="For translating your voice." status={perms.microphone} onGrant={async () => { await window.api.askMicPermission(); refreshPerms() }} onRefresh={refreshPerms} />
-                )}
-              </section>
-              <section>
-                <label className="field-label">Redo first-run setup</label>
-                <button className="ghost-btn" onClick={() => { applyLive({ onboarded: false }); onClose() }}>Show onboarding again</button>
-              </section>
-              <section>
-                <p className="hint">Changes here apply live — no app restart needed. Only granting a new macOS permission needs the one-tap Relaunch above.</p>
-              </section>
-            </>
-          )}
-        </div>
-      </div>
     </div>
   )
 }
