@@ -1,0 +1,26 @@
+appId: com.brimmer.supertranslate
+productName: SuperTranslate
+directories:
+  buildResources: build
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintrc,.prettierrc,tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml,package-lock.json}'
+mac:
+  category: public.app-category.productivity
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: SuperTranslate uses your microphone to transcribe and translate what you say.
+    NSAudioCaptureUsageDescription: SuperTranslate captures system audio so it can transcribe and translate the other person on your call.
+win:
+  target: nsis
+  artifactName: ${productName}-${version}-setup.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true

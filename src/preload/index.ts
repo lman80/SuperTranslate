@@ -1,0 +1,61 @@
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
+
+type Source = 'mic' | 'system'
+type Unsubscribe = () => void
+
+function subscribe<T>(channel: string, cb: (payload: T) => void): Unsubscribe {
+  const handler = (_e: IpcRendererEvent, payload: T): void => cb(payload)
+  ipcRenderer.on(channel, handler)
+  return () => ipcRenderer.removeListener(channel, handler)
+}
+
+const api = {
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  saveSettings: (patch: unknown) => ipcRenderer.invoke('settings:save', patch),
+  getUsage: () => ipcRenderer.invoke('usage:get'),
+
+  startCapture: () => ipcRenderer.invoke('capture:start'),
+  stopCapture: () => ipcRenderer.invoke('capture:stop'),
+  sendAudio: (source: Source, buffer: ArrayBuffer) =>
+    ipcRenderer.send('audio:chunk', source, buffer),
+
+  onPartial: (cb: (p: { source: Source; text: string }) => void) =>
+    subscribe('caption:partial', cb),
+  onFinal: (
+    cb: (p: {
+      id: string
+      source: Source
+      original: string
+      sourceLang: string
+      targetLang: string
+    }) => void
+  ) => subscribe('caption:final', cb),
+  onTranslation: (
+    cb: (p: {
+      id: string
+      translation: string
+      note?: string
+      error?: string
+      final?: boolean
+      source?: Source
+      targetLang?: string
+    }) => void
+  ) => subscribe('caption:translation', cb),
+  onStatus: (cb: (p: { source: Source; status: string }) => void) => subscribe('status', cb),
+  onError: (cb: (p: { source: Source; message: string }) => void) => subscribe('error', cb),
+  onUsage: (cb: (p: { spent: number; budget: number; month: string }) => void) =>
+    subscribe('usage', cb),
+  onTtsPlay: (cb: (p: { id: string; audioBase64: string; mime: string }) => void) =>
+    subscribe('tts:play', cb),
+  onBudget: (
+    cb: (p: { reached: boolean; warning?: boolean; spent: number; budget: number }) => void
+  ) => subscribe('budget', cb),
+
+  windowControl: (action: 'minimize' | 'close' | 'pin' | 'unpin') =>
+    ipcRenderer.send('window:control', action),
+  openExternal: (url: string) => ipcRenderer.send('open-external', url)
+}
+
+contextBridge.exposeInMainWorld('api', api)
+
+export type Api = typeof api
