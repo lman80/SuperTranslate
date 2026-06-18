@@ -67,25 +67,35 @@ export class OpenAIRealtimeSession {
     this.ws = ws
 
     ws.on('open', () => {
-      this.attempts = 0
-      this.cb.onStatus('open')
-      // Configure as a simultaneous interpreter into the target language.
-      this.sendJson({
-        type: 'session.update',
-        session: {
-          audio: {
-            input: {
-              format: { type: 'audio/pcm', rate: OUT_RATE },
-              transcription: { model: 'gpt-realtime-whisper' },
-              noise_reduction: { type: 'near_field' }
-            },
-            output: { language: this.cfg.targetLanguageCode }
+      try {
+        this.attempts = 0
+        this.cb.onStatus('open')
+        // Configure as a simultaneous interpreter into the target language.
+        this.sendJson({
+          type: 'session.update',
+          session: {
+            audio: {
+              input: {
+                format: { type: 'audio/pcm', rate: OUT_RATE },
+                transcription: { model: 'gpt-realtime-whisper' },
+                noise_reduction: { type: 'near_field' }
+              },
+              output: { language: this.cfg.targetLanguageCode }
+            }
           }
-        }
-      })
+        })
+      } catch (e) {
+        this.cb.onError(`Turbo (OpenAI) config failed: ${(e as Error).message}`)
+      }
     })
 
-    ws.on('message', (data) => this.handle(data))
+    ws.on('message', (data) => {
+      try {
+        this.handle(data)
+      } catch (e) {
+        this.cb.onLog?.(`handle error: ${(e as Error).message}`)
+      }
+    })
 
     // A bad key fails the HTTP upgrade (401) before 'open'.
     ws.on('unexpected-response', (_req, res) => {
@@ -194,16 +204,20 @@ export class OpenAIRealtimeSession {
 
   sendAudio(buffer: ArrayBuffer | Uint8Array): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    const u8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
-    const inSamples = Math.floor(u8.byteLength / 2)
-    if (inSamples === 0) return
-    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength)
-    const inI16 = new Int16Array(inSamples)
-    for (let i = 0; i < inSamples; i++) inI16[i] = dv.getInt16(i * 2, true)
-    const out = this.upsample(inI16)
-    const bytes = Buffer.allocUnsafe(out.length * 2)
-    for (let i = 0; i < out.length; i++) bytes.writeInt16LE(out[i], i * 2)
-    this.sendJson({ type: 'input_audio_buffer.append', audio: bytes.toString('base64') })
+    try {
+      const u8 = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
+      const inSamples = Math.floor(u8.byteLength / 2)
+      if (inSamples === 0) return
+      const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength)
+      const inI16 = new Int16Array(inSamples)
+      for (let i = 0; i < inSamples; i++) inI16[i] = dv.getInt16(i * 2, true)
+      const out = this.upsample(inI16)
+      const bytes = Buffer.allocUnsafe(out.length * 2)
+      for (let i = 0; i < out.length; i++) bytes.writeInt16LE(out[i], i * 2)
+      this.sendJson({ type: 'input_audio_buffer.append', audio: bytes.toString('base64') })
+    } catch (e) {
+      this.cb.onLog?.(`sendAudio error: ${(e as Error).message}`)
+    }
   }
 
   stop(): void {

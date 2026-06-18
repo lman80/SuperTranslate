@@ -73,6 +73,24 @@ function dbg(msg: string): void {
 }
 const chunkCounts: Record<Source, number> = { mic: 0, system: 0 }
 
+// Last-resort guard: never let an uncaught error in a socket/audio callback kill the
+// whole app. Log the stack (debug.log), tell the user, and stop capture cleanly.
+process.on('uncaughtException', (err: Error) => {
+  dbg(`UNCAUGHT ${err?.stack ?? String(err)}`)
+  try {
+    send('error', {
+      source: 'system',
+      message: `Something went wrong (${err?.message ?? err}). Translation stopped — press Start to retry.`
+    })
+  } catch {
+    /* ignore */
+  }
+  void stopAll()
+})
+process.on('unhandledRejection', (reason) => {
+  dbg(`UNHANDLED ${reason instanceof Error ? reason.stack : String(reason)}`)
+})
+
 // ---- Overlay window sizing/positioning ----
 // The window is a compact caption overlay that MORPHS between modes; the main process
 // owns all sizing so the window is never bigger than the current mode needs.
