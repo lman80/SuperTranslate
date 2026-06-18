@@ -1,4 +1,12 @@
-import { app, BrowserWindow, session, desktopCapturer, ipcMain, shell } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  session,
+  desktopCapturer,
+  ipcMain,
+  shell,
+  systemPreferences
+} from 'electron'
 import { join } from 'path'
 import { appendFileSync, writeFileSync } from 'fs'
 import { loadSettings, saveSettings, type Settings, type Provider } from './settings'
@@ -449,6 +457,27 @@ ipcMain.handle('apps:list', () => listRunningApps())
 
 ipcMain.on('open-screen-settings', () => {
   shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+})
+
+ipcMain.on('open-mic-settings', () => {
+  shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone')
+})
+
+ipcMain.handle('permissions:get', () => {
+  if (process.platform !== 'darwin') return { screen: 'granted', microphone: 'granted' }
+  return {
+    screen: systemPreferences.getMediaAccessStatus('screen'),
+    microphone: systemPreferences.getMediaAccessStatus('microphone')
+  }
+})
+
+ipcMain.handle('permissions:askMic', async () => {
+  if (process.platform !== 'darwin') return true
+  try {
+    return await systemPreferences.askForMediaAccess('microphone')
+  } catch {
+    return false
+  }
 })
 
 ipcMain.handle('capture:stop', async () => {

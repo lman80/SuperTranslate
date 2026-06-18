@@ -27,6 +27,8 @@ export interface Settings {
   responseSpeed: 'fast' | 'balanced' | 'accurate' // how long to wait after a pause before finalizing
   turboMode: boolean // real-time speech-to-speech for the other person (Gemini Live Translate)
   geminiApiKey: string
+  onboarded: boolean // has the user completed (or skipped) first-run setup
+  fontScalePref: number // active font scale chosen via A-/A+ (overrides fontScale when set)
 }
 
 const defaults: Settings = {
@@ -51,7 +53,9 @@ const defaults: Settings = {
   ttsRate: 1.25,
   responseSpeed: 'fast',
   turboMode: false,
-  geminiApiKey: ''
+  geminiApiKey: '',
+  onboarded: false,
+  fontScalePref: 1
 }
 
 function settingsFile(): string {

@@ -59,6 +59,10 @@ const api = {
     ipcRenderer.send('window:control', action),
   openExternal: (url: string) => ipcRenderer.send('open-external', url),
   openScreenSettings: () => ipcRenderer.send('open-screen-settings'),
+  openMicSettings: () => ipcRenderer.send('open-mic-settings'),
+  getPermissions: () =>
+    ipcRenderer.invoke('permissions:get') as Promise<{ screen: string; microphone: string }>,
+  askMicPermission: () => ipcRenderer.invoke('permissions:askMic') as Promise<boolean>,
   relaunchApp: () => ipcRenderer.send('app:relaunch')
 }
 
