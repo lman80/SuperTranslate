@@ -155,17 +155,14 @@ export default function App() {
     }, 400) // small tail
   }, [])
 
-  // Turbo: while Gemini's dub is PLAYING, mute BOTH mic and system capture so the
-  // system loopback can't re-capture the dub and feed it back to Gemini (the loop).
+  // Turbo: mute only the mic while the dub plays (so it isn't transcribed as "You").
+  // System keeps listening so it never goes dead. The real loop fix is per-app
+  // capture (excluding our own output) — being built next.
   const turboGuardTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const turboGuard = useCallback((msUntilDone: number) => {
     setMicMuted(true)
-    setSystemMuted(true)
     if (turboGuardTimer.current) clearTimeout(turboGuardTimer.current)
-    turboGuardTimer.current = setTimeout(() => {
-      setMicMuted(false)
-      setSystemMuted(false)
-    }, msUntilDone + 400)
+    turboGuardTimer.current = setTimeout(() => setMicMuted(false), msUntilDone + 400)
   }, [])
 
   const speak = useCallback(
