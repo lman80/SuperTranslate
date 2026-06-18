@@ -415,16 +415,10 @@ ipcMain.handle('capture:start', async () => {
         if (!running) return
         if (!sessions.system) startSession('system', s)
         sessions.system?.sendAudio(pcm)
-        emitSystemLevel(pcm)
       },
-      onError: (message) =>
-        send('error', {
-          source: 'system',
-          message: /permission|denied|not allowed|tcc/i.test(message)
-            ? 'System audio needs permission. Open System Settings → Privacy & Security → Audio Recording (or Screen & System Audio Recording), enable SuperTranslate, then use the Restart button.'
-            : `System audio: ${message}`
-        }),
-      onLog: (m) => dbg(`audiotee: ${m}`)
+      onLevel: (rms) => emitSystemLevel(rms),
+      onError: (message) => send('error', { source: 'system', message }),
+      onLog: (m) => dbg(`sck: ${m}`)
     })
     macTap.start().catch((e) =>
       send('error', { source: 'system', message: `Couldn't start system audio: ${e.message}` })
@@ -435,19 +429,12 @@ ipcMain.handle('capture:start', async () => {
   return { captureSystemInRenderer: s.captureSystemAudio }
 })
 
-// RMS level (0..1) from 16-bit PCM, throttled to the renderer for the "Them" dot.
-function emitSystemLevel(pcm: Buffer): void {
+// Throttle the captured-audio level to the renderer for the "Them" dot.
+function emitSystemLevel(rms: number): void {
   const now = Date.now()
-  if (now - lastLevelSent < 300) return
+  if (now - lastLevelSent < 250) return
   lastLevelSent = now
-  const n = Math.floor(pcm.length / 2)
-  if (n === 0) return
-  let sum = 0
-  for (let i = 0; i < n; i++) {
-    const v = pcm.readInt16LE(i * 2) / 32768
-    sum += v * v
-  }
-  send('system:level', { rms: Math.sqrt(sum / n) })
+  send('system:level', { rms })
 }
 
 ipcMain.handle('apps:list', () => listRunningApps())

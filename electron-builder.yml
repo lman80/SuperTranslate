@@ -1,5 +1,8 @@
 appId: com.brimmer.supertranslate
 productName: SuperTranslate
+# The native module ships an N-API prebuilt binary that already loads under
+# Electron; don't recompile it from source (avoids node-gyp/Python issues).
+npmRebuild: false
 directories:
   buildResources: build
 files:
@@ -10,6 +13,8 @@ files:
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml,package-lock.json}'
 asarUnpack:
   - '**/node_modules/audiotee/bin/**'
+  - '**/node_modules/screencapturekit-audio-capture/**'
+  - '**/*.node'
 mac:
   category: public.app-category.productivity
   hardenedRuntime: true

@@ -769,11 +769,19 @@ function SettingsPanel({
                   onChange={(e) => {
                     const pid = Number(e.target.value)
                     set('captureAppPid', pid)
-                    set('captureAppName', apps.find((a) => a.pid === pid)?.name ?? '')
+                    set(
+                      'captureAppName',
+                      apps.find((a) => a.pid === pid)?.name ?? (pid ? s.captureAppName : '')
+                    )
                   }}
                   style={{ flex: 1 }}
                 >
-                  <option value={0}>Whole system (can echo)</option>
+                  <option value={0}>— pick an app —</option>
+                  {s.captureAppPid > 0 && !apps.some((a) => a.pid === s.captureAppPid) && (
+                    <option value={s.captureAppPid}>
+                      {s.captureAppName || `PID ${s.captureAppPid}`}
+                    </option>
+                  )}
                   {apps.map((a) => (
                     <option key={a.pid} value={a.pid}>
                       {a.name}
@@ -785,9 +793,9 @@ function SettingsPanel({
                 </button>
               </div>
               <p className="hint">
-                Pick the app the other person’s voice plays from (Zoom, Teams, your browser).
-                Capturing just that app stops the echo loop. (First use asks for Audio Recording
-                permission — then hit Restart.)
+                Pick the app the other person’s voice plays from (Zoom, Teams, your browser),
+                then <b>Restart</b>. Capturing just that app stops the echo loop. First use asks for
+                <b> Screen Recording</b> permission. If the list is empty, grant it and tap ↻.
               </p>
               <button className="link" onClick={() => window.api.relaunchApp()}>
                 Restart app ↻
