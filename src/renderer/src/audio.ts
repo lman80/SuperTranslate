@@ -28,6 +28,7 @@ export interface CaptureResult {
 export interface CaptureOptions {
   captureSystemAudio: boolean
   onWarning: (message: string) => void
+  onSystemLevel?: (rms: number) => void // live loudness of captured system audio (0..1)
 }
 
 async function pipeStreamToPcm(
@@ -59,6 +60,7 @@ async function pipeStreamToPcm(
 export async function startCapture(opts: CaptureOptions): Promise<CaptureResult> {
   const contexts: AudioContext[] = []
   const streams: MediaStream[] = []
+  const timers: ReturnType<typeof setInterval>[] = []
   let systemAudioActive = false
   captureMuted = false
 
@@ -75,9 +77,11 @@ export async function startCapture(opts: CaptureOptions): Promise<CaptureResult>
   // "Invalid capture constraints". We request a tiny 4x4 video and discard it.
   if (opts.captureSystemAudio) {
     try {
+      // A real (small) video size is required — a tiny 4x4 makes macOS hand back a
+      // SILENT audio track on some Macs (Electron #49607). 320x240 avoids that.
       const display = await navigator.mediaDevices.getDisplayMedia({
         audio: true,
-        video: { width: 4, height: 4, frameRate: 1 }
+        video: { width: 320, height: 240, frameRate: 5 }
       })
       display.getVideoTracks().forEach((t) => {
         t.stop()
@@ -92,6 +96,25 @@ export async function startCapture(opts: CaptureOptions): Promise<CaptureResult>
         streams.push(display)
         await pipeStreamToPcm('system', display, contexts)
         systemAudioActive = true
+
+        // Live level meter on the captured system audio, so we can SEE if it's silent.
+        if (opts.onSystemLevel) {
+          const meterCtx = new AudioContext()
+          contexts.push(meterCtx)
+          const meterSrc = meterCtx.createMediaStreamSource(display)
+          const analyser = meterCtx.createAnalyser()
+          analyser.fftSize = 512
+          meterSrc.connect(analyser)
+          const buf = new Float32Array(analyser.fftSize)
+          timers.push(
+            setInterval(() => {
+              analyser.getFloatTimeDomainData(buf)
+              let sum = 0
+              for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i]
+              opts.onSystemLevel!(Math.sqrt(sum / buf.length))
+            }, 350)
+          )
+        }
       }
     } catch (e) {
       const err = e as Error
@@ -106,6 +129,7 @@ export async function startCapture(opts: CaptureOptions): Promise<CaptureResult>
   return {
     systemAudioActive,
     stop: () => {
+      timers.forEach((t) => clearInterval(t))
       streams.forEach((s) => s.getTracks().forEach((t) => t.stop()))
       contexts.forEach((c) => c.close().catch(() => undefined))
     }

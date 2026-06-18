@@ -372,8 +372,10 @@ ipcMain.on('open-external', (_e, url: string) => {
 // ---- App lifecycle ----
 
 app.whenReady().then(() => {
-  if (process.platform === 'darwin') app.dock?.show()
-
+  // NOTE: do NOT call app.dock.show() — setVisibleOnAllWorkspaces transforms the
+  // process so the window floats over all spaces/full-screen apps (and hides the
+  // Dock icon). Forcing the Dock icon back disables that float. In-app ✕/Restart
+  // handle quitting instead.
   session.defaultSession.setDisplayMediaRequestHandler(
     async (_request, callback) => {
       try {

@@ -78,6 +78,7 @@ export default function App() {
   const [usage, setUsage] = useState<UsageState | null>(null)
   const [turboStatus, setTurboStatus] = useState<'off' | 'connecting' | 'ready' | 'live'>('off')
   const turboLiveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [systemLevel, setSystemLevel] = useState(0)
 
   const captureRef = useRef<CaptureResult | null>(null)
   const feedRef = useRef<HTMLDivElement | null>(null)
@@ -317,7 +318,8 @@ export default function App() {
       }
       captureRef.current = await startCapture({
         captureSystemAudio: settings.captureSystemAudio,
-        onWarning: (m) => flash(m, true)
+        onWarning: (m) => flash(m, true),
+        onSystemLevel: (rms) => setSystemLevel(rms)
       })
       setRunning(true)
     } catch (e) {
@@ -347,6 +349,7 @@ export default function App() {
     await window.api.stopCapture().catch(() => undefined)
     setRunning(false)
     setPartial({ mic: '', system: '' })
+    setSystemLevel(0)
   }, [])
 
   const runDemo = useCallback(() => {
@@ -454,6 +457,16 @@ export default function App() {
         <span className="chip them">
           Them · {LANG_LABEL[settings.theirLanguage] ?? settings.theirLanguage}
         </span>
+        {running && settings.captureSystemAudio && (
+          <span
+            className={`sysdot ${systemLevel > 0.006 ? 'on' : ''}`}
+            title={
+              systemLevel > 0.006
+                ? 'Hearing the other person ✓'
+                : 'No system audio detected — check the Screen Recording permission, and use headphones'
+            }
+          />
+        )}
         <button
           className={`turbo-pill ${settings.turboMode ? turboStatus : 'disabled'}`}
           onClick={toggleTurbo}

@@ -169,6 +169,18 @@ body {
   font-size: 13px;
 }
 
+.sysdot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  transition: background 0.2s;
+}
+.sysdot.on {
+  background: var(--them);
+  box-shadow: 0 0 8px var(--them);
+}
+
 .turbo-pill {
   -webkit-app-region: no-drag;
   margin-left: 6px;
