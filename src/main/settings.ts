@@ -20,6 +20,8 @@ export interface Settings {
   elevenLabsVoiceId: string
   ttsRate: number // playback speed of the spoken translation (1 = normal)
   responseSpeed: 'fast' | 'balanced' | 'accurate' // how long to wait after a pause before finalizing
+  turboMode: boolean // real-time speech-to-speech for the other person (Gemini Live Translate)
+  geminiApiKey: string
 }
 
 const defaults: Settings = {
@@ -37,7 +39,9 @@ const defaults: Settings = {
   elevenLabsApiKey: '',
   elevenLabsVoiceId: '',
   ttsRate: 1.25,
-  responseSpeed: 'fast'
+  responseSpeed: 'fast',
+  turboMode: false,
+  geminiApiKey: ''
 }
 
 function settingsFile(): string {

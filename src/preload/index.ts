@@ -47,6 +47,7 @@ const api = {
     subscribe('usage', cb),
   onTtsPlay: (cb: (p: { id: string; audioBase64: string; mime: string }) => void) =>
     subscribe('tts:play', cb),
+  onTurboAudio: (cb: (p: { data: string }) => void) => subscribe('turbo:audio', cb),
   onBudget: (
     cb: (p: { reached: boolean; warning?: boolean; spent: number; budget: number }) => void
   ) => subscribe('budget', cb),

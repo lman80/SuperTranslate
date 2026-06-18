@@ -585,6 +585,13 @@ body {
   border-color: var(--you);
 }
 
+.modal section.turbo {
+  border: 1px solid rgba(122, 107, 255, 0.35);
+  background: linear-gradient(rgba(122, 107, 255, 0.12), rgba(122, 107, 255, 0.04));
+  border-radius: 12px;
+  padding: 12px;
+}
+
 .toggles {
   display: flex;
   flex-direction: column;

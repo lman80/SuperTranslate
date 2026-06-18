@@ -2,6 +2,7 @@ import { app, BrowserWindow, session, desktopCapturer, ipcMain, shell } from 'el
 import { join } from 'path'
 import { loadSettings, saveSettings, type Settings, type Provider } from './settings'
 import { SonioxSession } from './soniox'
+import { GeminiLiveSession } from './geminiLive'
 import { translateStream } from './translate'
 import { elevenLabsTts } from './tts'
 import { getUsage, addStt, addTranslate, addTts, totalUsd } from './usage'
@@ -13,6 +14,7 @@ type Source = 'mic' | 'system'
 // rates are per 1M tokens (input/output) and use the API's reported token counts.
 const SONIOX_USD_PER_MIN = 0.12 / 60
 const ELEVENLABS_USD_PER_MCHAR = 100 // ≈ $0.10 per 1k characters (conservative)
+const GEMINI_TURBO_USD_PER_MIN = 0.023 // Gemini 3.5 Live Translate, all-in
 const ACCRUAL_SECONDS = 5
 // How long Soniox waits after a pause before finalizing a sentence.
 // Lower = snappier but splits sentences more; higher = fewer splits but more lag.
@@ -28,7 +30,8 @@ const TRANSLATE_RATES: Record<Provider, { in: number; out: number }> = {
 }
 
 let win: BrowserWindow | null = null
-const sessions: Record<Source, SonioxSession | null> = { mic: null, system: null }
+const sessions: Record<Source, SonioxSession | GeminiLiveSession | null> = { mic: null, system: null }
+let systemIsGemini = false
 let running = false
 let activeSettings: Settings | null = null
 let accrualTimer: ReturnType<typeof setInterval> | null = null
@@ -69,10 +72,67 @@ function createWindow(): void {
 function stopSession(source: Source): void {
   sessions[source]?.stop()
   sessions[source] = null
+  if (source === 'system') systemIsGemini = false
+}
+
+// Real-time speech-to-speech for the other person via Gemini Live Translate.
+function startGeminiSystemSession(s: Settings): void {
+  const targetLang = s.myLanguage === 'auto' ? 'en' : s.myLanguage
+  let orig = ''
+  let trans = ''
+  let turnSeq = 0
+  const gem = new GeminiLiveSession(
+    { apiKey: s.geminiApiKey, targetLanguageCode: targetLang },
+    {
+      onStatus: (status) => send('status', { source: 'system', status }),
+      onError: (message) => send('error', { source: 'system', message }),
+      onOriginal: (t) => {
+        orig += t
+        send('caption:partial', { source: 'system', text: orig.trim() })
+      },
+      onTranslated: (t) => {
+        trans += t
+      },
+      onAudio: (b64) => send('turbo:audio', { data: b64 }),
+      onTurnComplete: () => {
+        const o = orig.trim()
+        const tr = trans.trim()
+        orig = ''
+        trans = ''
+        send('caption:partial', { source: 'system', text: '' })
+        if (o || tr) {
+          const id = `turbo-${Date.now()}-${turnSeq++}`
+          send('caption:final', {
+            id,
+            source: 'system',
+            original: o,
+            sourceLang: s.theirLanguage,
+            targetLang
+          })
+          send('caption:translation', {
+            id,
+            translation: tr,
+            final: true,
+            source: 'system',
+            targetLang
+          })
+        }
+      }
+    }
+  )
+  sessions.system = gem
+  systemIsGemini = true
+  void gem.start()
 }
 
 function startSession(source: Source, s: Settings): void {
   stopSession(source)
+
+  // Turbo: the other person's channel goes through Gemini real-time speech-to-speech.
+  if (source === 'system' && s.turboMode && s.geminiApiKey) {
+    startGeminiSystemSession(s)
+    return
+  }
 
   const languageHints =
     source === 'mic'
@@ -195,10 +255,13 @@ async function checkBudget(): Promise<void> {
 function startAccrual(): void {
   stopAccrual()
   accrualTimer = setInterval(async () => {
-    const activeStreams = Object.values(sessions).filter(Boolean).length
-    if (activeStreams > 0) {
-      await addStt(SONIOX_USD_PER_MIN * (ACCRUAL_SECONDS / 60) * activeStreams)
+    const dtMin = ACCRUAL_SECONDS / 60
+    let usd = 0
+    if (sessions.mic) usd += SONIOX_USD_PER_MIN * dtMin
+    if (sessions.system) {
+      usd += (systemIsGemini ? GEMINI_TURBO_USD_PER_MIN : SONIOX_USD_PER_MIN) * dtMin
     }
+    if (usd > 0) await addStt(usd)
     await emitUsage()
     await checkBudget()
   }, ACCRUAL_SECONDS * 1000)

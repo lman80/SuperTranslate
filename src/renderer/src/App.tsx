@@ -20,6 +20,8 @@ interface Settings {
   elevenLabsVoiceId: string
   ttsRate: number
   responseSpeed: 'fast' | 'balanced' | 'accurate'
+  turboMode: boolean
+  geminiApiKey: string
 }
 
 interface UsageState {
@@ -82,6 +84,35 @@ export default function App() {
   const settingsRef = useRef<Settings | null>(null)
   const voicesRef = useRef<SpeechSynthesisVoice[]>([])
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null)
+  const turboCtxRef = useRef<AudioContext | null>(null)
+  const turboNextTimeRef = useRef(0)
+
+  // Play streaming 24kHz PCM audio from Gemini Turbo, scheduling chunks back-to-back.
+  const playTurboPcm = useCallback((base64: string) => {
+    try {
+      const bin = atob(base64)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      const int16 = new Int16Array(bytes.buffer, 0, Math.floor(bytes.length / 2))
+      if (!turboCtxRef.current) {
+        turboCtxRef.current = new AudioContext({ sampleRate: 24000 })
+        turboNextTimeRef.current = turboCtxRef.current.currentTime
+      }
+      const ctx = turboCtxRef.current
+      const f32 = new Float32Array(int16.length)
+      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768
+      const buf = ctx.createBuffer(1, f32.length, 24000)
+      buf.copyToChannel(f32, 0)
+      const node = ctx.createBufferSource()
+      node.buffer = buf
+      node.connect(ctx.destination)
+      const startAt = Math.max(ctx.currentTime, turboNextTimeRef.current)
+      node.start(startAt)
+      turboNextTimeRef.current = startAt + buf.duration
+    } catch {
+      /* ignore malformed chunk */
+    }
+  }, [])
 
   // Keep a ref of settings so event handlers (registered once) read fresh values.
   useEffect(() => {
@@ -181,18 +212,20 @@ export default function App() {
         setEntries((prev) =>
           prev.map((e) => (e.id === id ? { ...e, translation, note, error } : e))
         )
-        // Free local voice path. (ElevenLabs audio arrives via onTtsPlay from main.)
+        // Free local voice path. (ElevenLabs audio → onTtsPlay; Turbo audio → onTurboAudio.)
         if (
           final &&
           translation &&
           source === 'system' &&
           settingsRef.current?.speakAloud &&
-          settingsRef.current?.ttsEngine !== 'elevenlabs'
+          settingsRef.current?.ttsEngine !== 'elevenlabs' &&
+          !settingsRef.current?.turboMode
         ) {
           speak(translation, targetLang || settingsRef.current?.myLanguage || 'en')
         }
       }
     )
+    const offTurbo = window.api.onTurboAudio(({ data }) => playTurboPcm(data))
     const offTts = window.api.onTtsPlay(({ audioBase64, mime }) => {
       try {
         ttsAudioRef.current?.pause()
@@ -231,8 +264,9 @@ export default function App() {
       offUsage()
       offBudget()
       offTts()
+      offTurbo()
     }
-  }, [flash, speak, guardOn, guardOff])
+  }, [flash, speak, guardOn, guardOff, playTurboPcm])
 
   // Auto-scroll the feed only when the user is already at the bottom, so scrolling
   // up to re-read isn't interrupted every time someone speaks.
@@ -279,6 +313,8 @@ export default function App() {
       ttsAudioRef.current = null
       if (ttsGuardTimer.current) clearTimeout(ttsGuardTimer.current)
       setCaptureMuted(false)
+      turboCtxRef.current?.close().catch(() => undefined)
+      turboCtxRef.current = null
     } catch {
       /* ignore */
     }
@@ -560,6 +596,41 @@ function SettingsPanel({
               <option value="auto">Auto-detect</option>
             </select>
           </div>
+        </section>
+
+        <section className="turbo">
+          <label className="field-label">⚡ Turbo — instant real-time voice</label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={s.turboMode}
+              onChange={(e) => set('turboMode', e.target.checked)}
+            />
+            <span>
+              Real-time speech-to-speech for the other person (Gemini) — instant,
+              interpreter-grade voice, ~$1.40/hour.
+            </span>
+          </label>
+          {s.turboMode && (
+            <>
+              <input
+                type="password"
+                placeholder="Paste your Gemini API key"
+                value={s.geminiApiKey}
+                onChange={(e) => set('geminiApiKey', e.target.value)}
+              />
+              <button
+                className="link"
+                onClick={() => window.api.openExternal('https://aistudio.google.com/apikey')}
+              >
+                Get a Gemini key →
+              </button>
+              <p className="hint">
+                Replaces transcribe→translate→speak with one instant model for the other person’s
+                voice. Your spend cap still applies. Not available in mainland China.
+              </p>
+            </>
+          )}
         </section>
 
         <section className="toggles">
