@@ -702,6 +702,11 @@ function SettingsPanel({
             />
             <span>Capture the other person’s voice from this computer (calls)</span>
           </label>
+          {s.captureSystemAudio && (
+            <button className="link" onClick={() => window.api.openScreenSettings()}>
+              Fix “other person’s voice” — open Screen &amp; System Audio Recording settings →
+            </button>
+          )}
           <label className="toggle">
             <input
               type="checkbox"

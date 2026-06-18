@@ -1,4 +1,12 @@
-import { app, BrowserWindow, session, desktopCapturer, ipcMain, shell } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  session,
+  desktopCapturer,
+  ipcMain,
+  shell,
+  systemPreferences
+} from 'electron'
 import { join } from 'path'
 import { loadSettings, saveSettings, type Settings, type Provider } from './settings'
 import { SonioxSession } from './soniox'
@@ -305,7 +313,27 @@ ipcMain.handle('capture:start', async () => {
   warned80 = false
   startAccrual()
   await emitUsage()
+
+  // macOS hands back a SILENT system-audio track if "Screen & System Audio
+  // Recording" isn't granted (no error) — detect that and tell the user clearly.
+  if (process.platform === 'darwin' && s.captureSystemAudio) {
+    try {
+      if (systemPreferences.getMediaAccessStatus('screen') !== 'granted') {
+        send('error', {
+          source: 'system',
+          message:
+            "Can't hear the other person yet: macOS needs “Screen & System Audio Recording” for SuperTranslate. Open System Settings → Privacy & Security → Screen & System Audio Recording, turn SuperTranslate on, then QUIT and reopen the app. Tip: use headphones so your mic doesn't pick up your speakers."
+        })
+      }
+    } catch {
+      /* ignore */
+    }
+  }
   return { captureSystem: s.captureSystemAudio }
+})
+
+ipcMain.on('open-screen-settings', () => {
+  shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
 })
 
 ipcMain.handle('capture:stop', async () => {
