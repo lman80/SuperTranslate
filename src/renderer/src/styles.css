@@ -497,7 +497,7 @@ select {
 }
 .notice .n-text {
   flex: 1;
-  color: var(--ink);
+  color: #f4f4f6; /* notice is always a dark pill — keep text light in both themes */
 }
 .notice .n-btn {
   border: none;
@@ -511,7 +511,7 @@ select {
 .notice .n-x {
   border: none;
   background: transparent;
-  color: var(--ink-3);
+  color: rgba(255, 255, 255, 0.6);
   font-size: 12px;
 }
 
@@ -526,7 +526,7 @@ select {
   border-radius: 8px;
   padding: 6px 13px;
   font-size: 11.5px;
-  color: var(--ink);
+  color: #f4f4f6; /* dark pill in both themes */
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   z-index: 35;
   white-space: nowrap;

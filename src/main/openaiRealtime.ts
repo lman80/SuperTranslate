@@ -214,7 +214,9 @@ export class OpenAIRealtimeSession {
       const out = this.upsample(inI16)
       const bytes = Buffer.allocUnsafe(out.length * 2)
       for (let i = 0; i < out.length; i++) bytes.writeInt16LE(out[i], i * 2)
-      this.sendJson({ type: 'input_audio_buffer.append', audio: bytes.toString('base64') })
+      // The /realtime/translations endpoint requires session.*-prefixed client events
+      // (server confirmed: session.update / session.input_audio_buffer.append / session.close).
+      this.sendJson({ type: 'session.input_audio_buffer.append', audio: bytes.toString('base64') })
     } catch (e) {
       this.cb.onLog?.(`sendAudio error: ${(e as Error).message}`)
     }
