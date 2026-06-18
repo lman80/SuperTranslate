@@ -205,6 +205,7 @@ function startGeminiSystemSession(s: Settings): void {
 
 function startSession(source: Source, s: Settings): void {
   stopSession(source)
+  dbg(`startSession source=${source} turbo=${s.turboMode} hasGemini=${!!s.geminiApiKey}`)
 
   // Turbo: the other person's channel goes through Gemini real-time speech-to-speech.
   if (source === 'system' && s.turboMode && s.geminiApiKey) {
@@ -417,8 +418,15 @@ ipcMain.handle('capture:start', async () => {
         sessions.system?.sendAudio(pcm)
       },
       onLevel: (rms) => emitSystemLevel(rms),
-      onError: (message) => send('error', { source: 'system', message }),
-      onMode: (mode) => send('system:mode', { mode })
+      onError: (message) => {
+        dbg(`tap ERROR ${message}`)
+        send('error', { source: 'system', message })
+      },
+      onMode: (mode) => {
+        dbg(`tap mode=${mode}`)
+        send('system:mode', { mode })
+      },
+      onLog: (m) => dbg(`tap: ${m}`)
     })
     macTap.start().catch((e) =>
       send('error', { source: 'system', message: `Couldn't start system audio: ${e.message}` })

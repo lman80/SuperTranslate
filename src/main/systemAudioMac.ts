@@ -67,6 +67,7 @@ export interface TapCallbacks {
   onLevel: (rms: number) => void
   onError: (message: string) => void
   onMode?: (mode: 'muted' | 'overlap') => void
+  onLog?: (message: string) => void
 }
 
 export class MacSystemTap {
@@ -88,6 +89,7 @@ export class MacSystemTap {
       )
       return
     }
+    this.cb.onLog?.(`start: trying CoreAudio mute-tap for pid ${this.includePid}`)
     // Try the muting CoreAudio tap first.
     try {
       const AudioTee = await loadAudioTee()
@@ -110,10 +112,13 @@ export class MacSystemTap {
         this.cb.onData(d)
         this.cb.onLevel(rms16(d))
       })
-      tee.on('error', () => {
+      tee.on('error', (e: unknown) => {
         // The chosen PID has no audio object (e.g. a browser → audio is in a helper).
         // Fall back to ScreenCaptureKit, which captures the whole app bundle.
         if (this.stopped || this.cap || this.gotData) return
+        this.cb.onLog?.(
+          `mute-tap error → falling back to ScreenCaptureKit: ${(e as Error)?.message ?? ''}`
+        )
         try {
           void this.tee?.stop()
         } catch {
@@ -130,6 +135,7 @@ export class MacSystemTap {
 
   private startScreenCaptureKit(): void {
     if (this.stopped) return
+    this.cb.onLog?.(`ScreenCaptureKit startCapture pid ${this.includePid}`)
     try {
       const cap = new AudioCapture()
       this.cap = cap
@@ -146,6 +152,7 @@ export class MacSystemTap {
         channels: 1
       })
       if (!ok) throw new Error('capture did not start')
+      this.cb.onLog?.('ScreenCaptureKit capture started (overlap mode)')
       this.cb.onMode?.('overlap')
     } catch (e) {
       const perm = AudioCapture.verifyPermissions()
