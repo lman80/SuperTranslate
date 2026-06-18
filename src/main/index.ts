@@ -76,7 +76,9 @@ function createWindow(): void {
     }
   })
 
-  win.setAlwaysOnTop(true, 'screen-saver')
+  // 'floating' keeps us above normal app windows but BELOW macOS system dialogs/
+  // permission prompts (so they're not hidden underneath us). 'screen-saver' covered them.
+  win.setAlwaysOnTop(true, 'floating')
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   win.once('ready-to-show', () => win?.show())
 
@@ -481,7 +483,7 @@ ipcMain.on('window:control', (_e, action: 'minimize' | 'close' | 'pin' | 'unpin'
   }
   if (!win) return
   if (action === 'minimize') win.minimize()
-  else if (action === 'pin') win.setAlwaysOnTop(true, 'screen-saver')
+  else if (action === 'pin') win.setAlwaysOnTop(true, 'floating')
   else if (action === 'unpin') win.setAlwaysOnTop(false)
 })
 

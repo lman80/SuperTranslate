@@ -210,6 +210,13 @@ export default function App() {
     window.api.getUsage().then((u) => setUsage(u as UsageState))
   }, [])
 
+  // While Settings is open, drop always-on-top so macOS permission prompts and the
+  // panel aren't hidden underneath the floating window. Restore when it closes.
+  useEffect(() => {
+    if (showSettings) window.api.windowControl('unpin')
+    else window.api.windowControl(pinned ? 'pin' : 'unpin')
+  }, [showSettings, pinned])
+
   // Subscribe to caption + status events.
   useEffect(() => {
     const offPartial = window.api.onPartial(({ source, text }) =>
