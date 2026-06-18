@@ -155,13 +155,17 @@ export default function App() {
     }, 400) // small tail
   }, [])
 
-  // Turbo: mute ONLY the mic while Gemini's dub plays (so the mic doesn't transcribe
-  // the English voice as "You"). System keeps flowing so Gemini gets continuous input.
+  // Turbo: while Gemini's dub is PLAYING, mute BOTH mic and system capture so the
+  // system loopback can't re-capture the dub and feed it back to Gemini (the loop).
   const turboGuardTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const turboMicGuard = useCallback((msUntilDone: number) => {
+  const turboGuard = useCallback((msUntilDone: number) => {
     setMicMuted(true)
+    setSystemMuted(true)
     if (turboGuardTimer.current) clearTimeout(turboGuardTimer.current)
-    turboGuardTimer.current = setTimeout(() => setMicMuted(false), msUntilDone + 350)
+    turboGuardTimer.current = setTimeout(() => {
+      setMicMuted(false)
+      setSystemMuted(false)
+    }, msUntilDone + 400)
   }, [])
 
   const speak = useCallback(
@@ -250,7 +254,7 @@ export default function App() {
       playTurboPcm(data)
       const ctx = turboCtxRef.current
       const msLeft = ctx ? Math.max(0, (turboNextTimeRef.current - ctx.currentTime) * 1000) : 600
-      turboMicGuard(msLeft) // mute mic while the dub plays so it isn't transcribed as "You"
+      turboGuard(msLeft) // stop listening while the dub plays so it can't loop back
       setTurboStatus('live')
       if (turboLiveTimer.current) clearTimeout(turboLiveTimer.current)
       turboLiveTimer.current = setTimeout(() => setTurboStatus('ready'), 1500)
@@ -302,7 +306,7 @@ export default function App() {
       offTurbo()
       offStatus()
     }
-  }, [flash, speak, guardOn, guardOff, playTurboPcm, turboMicGuard])
+  }, [flash, speak, guardOn, guardOff, playTurboPcm, turboGuard])
 
   // Auto-scroll the feed only when the user is already at the bottom, so scrolling
   // up to re-read isn't interrupted every time someone speaks.
