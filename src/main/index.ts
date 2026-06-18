@@ -411,7 +411,7 @@ ipcMain.handle('capture:start', async () => {
   // app means our own output is never in the stream → no feedback loop. The renderer
   // does NOT capture system audio on macOS.
   if (process.platform === 'darwin' && s.captureSystemAudio) {
-    macTap = new MacSystemTap(s.captureAppPid || undefined, {
+    macTap = new MacSystemTap(s.captureAppPid || undefined, s.captureAppName, {
       onData: (pcm) => {
         if (!running) return
         if (!sessions.system) startSession('system', s)

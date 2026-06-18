@@ -78,6 +78,7 @@ export class MacSystemTap {
 
   constructor(
     private readonly includePid: number | undefined,
+    private readonly appName: string,
     private readonly cb: TapCallbacks
   ) {}
 
@@ -89,7 +90,17 @@ export class MacSystemTap {
       )
       return
     }
-    this.cb.onLog?.(`start: trying CoreAudio mute-tap for pid ${this.includePid}`)
+    // Browsers play audio in a helper process; the CoreAudio mute-tap grabs the
+    // wrong one (silent capture + mangled channels). Use ScreenCaptureKit for them.
+    const isBrowser = /chrome|chromium|safari|firefox|edge|arc|brave|opera|vivaldi|webkit/i.test(
+      this.appName || ''
+    )
+    this.cb.onLog?.(`start: pid=${this.includePid} app="${this.appName}" browser=${isBrowser}`)
+    if (isBrowser) {
+      this.startScreenCaptureKit()
+      return
+    }
+    this.cb.onLog?.(`trying CoreAudio mute-tap for pid ${this.includePid}`)
     // Try the muting CoreAudio tap first.
     try {
       const AudioTee = await loadAudioTee()
