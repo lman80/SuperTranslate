@@ -4,7 +4,7 @@ import { startCapture, setMicMuted, setSystemMuted, type CaptureResult } from '.
 type Source = 'mic' | 'system'
 type Provider = 'deepseek' | 'qwen' | 'openrouter'
 type Dock = 'top-center' | 'bottom-center' | 'top-left' | 'top-right' | 'free'
-type Popover = 'lang' | 'app' | 'engine' | 'dock' | null
+type Popover = 'lang' | 'app' | 'dock' | null
 
 interface Settings {
   sonioxApiKey: string
@@ -628,6 +628,20 @@ export default function App() {
     setSettings((prev) => (prev ? { ...prev, dock: d } : prev))
   }, [])
 
+  // One-tap engine switch (Turbo <-> Standard). If the target engine has no key yet,
+  // jump to Setup instead of failing on (re)start.
+  const toggleEngine = useCallback(() => {
+    const s = settingsRef.current
+    if (!s) return
+    const target = !s.turboMode
+    if (!engineReady({ ...s, turboMode: target })) {
+      setSetupOpen(true)
+      flash(target ? 'Add your Turbo key in Setup.' : 'Add your Standard keys in Setup.')
+      return
+    }
+    void applyLive({ turboMode: target })
+  }, [applyLive, flash])
+
   if (!settings) return <div className="boot">Loading…</div>
 
   const fontScale = settings.fontScalePref || settings.fontScale || 1
@@ -686,6 +700,7 @@ export default function App() {
             <LiveControlRow
               settings={settings}
               dir={dir}
+              usage={usage}
               systemLevel={systemLevel}
               turboConnecting={turboConnecting}
               historyOpen={historyOpen}
@@ -695,6 +710,7 @@ export default function App() {
               onVolume={setVoiceVolume}
               onFont={cycleFont}
               onPopover={(p) => setPopover((cur) => (cur === p ? null : p))}
+              onToggleEngine={toggleEngine}
               onToggleHistory={() => setHistoryOpen((v) => !v)}
               onSetup={() => setSetupOpen(true)}
               onMinimize={() => setMinimized(true)}
@@ -705,11 +721,13 @@ export default function App() {
               settings={settings}
               ready={ready}
               dir={dir}
+              usage={usage}
               banner={latestBanner}
               onClearBanner={(k) => removeBanner(k)}
               onStart={start}
               busy={busy}
               onPopover={(p) => setPopover((cur) => (cur === p ? null : p))}
+              onToggleEngine={toggleEngine}
               onSetup={() => setSetupOpen(true)}
               onMinimize={() => setMinimized(true)}
               onQuit={() => window.api.windowControl('close')}
@@ -754,9 +772,6 @@ export default function App() {
               {popover === 'app' && (
                 <AppPickerPopover settings={settings} applyLive={applyLive} onPick={closePopover} />
               )}
-              {popover === 'engine' && (
-                <EnginePopover settings={settings} applyLive={applyLive} onPick={closePopover} />
-              )}
               {popover === 'dock' && (
                 <DockPopover settings={settings} setDock={setDock} onPick={closePopover} />
               )}
@@ -783,16 +798,48 @@ function LevelMeter({ level }: { level: number }) {
   )
 }
 
+/* ============================ Engine + cost chips ============================ */
+function EngineChip({ turbo, onToggle }: { turbo: boolean; onToggle: () => void }) {
+  return (
+    <button
+      className={`chip engine ${turbo ? 'turbo' : ''}`}
+      onClick={onToggle}
+      title={
+        turbo
+          ? 'Turbo (instant interpreter voice). Tap to switch to Standard.'
+          : 'Standard (transcript + translation). Tap to switch to Turbo.'
+      }
+    >
+      {turbo ? '⚡ Turbo' : '✎ Standard'}
+    </button>
+  )
+}
+function CostChip({ usage, onOpen }: { usage: UsageState | null; onOpen: () => void }) {
+  const spent = usage?.spent ?? 0
+  const budget = usage?.budget ?? 0
+  return (
+    <button
+      className="chip cost"
+      onClick={onOpen}
+      title={`≈ $${spent.toFixed(2)} spent this month${budget > 0 ? ` of $${budget.toFixed(0)} cap` : ''}`}
+    >
+      ${spent.toFixed(2)}
+    </button>
+  )
+}
+
 /* ============================ Idle row ============================ */
 function IdleRow({
   settings,
   ready,
   dir,
+  usage,
   banner,
   onClearBanner,
   onStart,
   busy,
   onPopover,
+  onToggleEngine,
   onSetup,
   onMinimize,
   onQuit
@@ -800,11 +847,13 @@ function IdleRow({
   settings: Settings
   ready: boolean
   dir: string
+  usage: UsageState | null
   banner?: [string, Banner]
   onClearBanner: (key: string) => void
   onStart: () => void
   busy: boolean
   onPopover: (p: Popover) => void
+  onToggleEngine: () => void
   onSetup: () => void
   onMinimize: () => void
   onQuit: () => void
@@ -830,12 +879,14 @@ function IdleRow({
   return (
     <div className="row idle-row">
       <span className={`dot ${ready ? '' : 'amber'}`} />
+      <EngineChip turbo={settings.turboMode} onToggle={onToggleEngine} />
       <span className="row-text" title={settings.captureAppName || undefined}>
         {settings.captureAppName ? settings.captureAppName : ready ? 'Ready' : 'Add your key'}
       </span>
       <button className="badge lang" onClick={() => onPopover('lang')} title="Languages">
         {dir} ▾
       </button>
+      <CostChip usage={usage} onOpen={onSetup} />
       {ready ? (
         <button className="mini primary start" onClick={onStart} disabled={busy}>
           {busy ? '…' : '▶ Start'}
@@ -893,6 +944,7 @@ function MiniHandle({ live, dot, onRestore }: { live: boolean; dot: string; onRe
 function LiveControlRow({
   settings,
   dir,
+  usage,
   systemLevel,
   turboConnecting,
   historyOpen,
@@ -902,6 +954,7 @@ function LiveControlRow({
   onVolume,
   onFont,
   onPopover,
+  onToggleEngine,
   onToggleHistory,
   onSetup,
   onMinimize,
@@ -909,6 +962,7 @@ function LiveControlRow({
 }: {
   settings: Settings
   dir: string
+  usage: UsageState | null
   systemLevel: number
   turboConnecting: boolean
   historyOpen: boolean
@@ -918,6 +972,7 @@ function LiveControlRow({
   onVolume: (v: number) => void
   onFont: () => void
   onPopover: (p: Popover) => void
+  onToggleEngine: () => void
   onToggleHistory: () => void
   onSetup: () => void
   onMinimize: () => void
@@ -931,6 +986,8 @@ function LiveControlRow({
       <span className={`rec ${turboConnecting ? 'connecting' : ''}`} />
       <LevelMeter level={systemLevel} />
       <span className="live-dir">{turboConnecting ? 'Connecting…' : dir}</span>
+      <EngineChip turbo={settings.turboMode} onToggle={onToggleEngine} />
+      <CostChip usage={usage} onOpen={onSetup} />
       <div className="cluster">
         <button
           className={`iconbtn ${settings.captureMic ? 'on' : ''}`}
@@ -1181,47 +1238,6 @@ function AppPickerPopover({
         ))}
       </div>
       <div className="pop-foot">Native apps get muted so you hear only the translation.</div>
-    </>
-  )
-}
-
-function EnginePopover({
-  settings,
-  applyLive,
-  onPick
-}: {
-  settings: Settings
-  applyLive: (p: Partial<Settings>) => void
-  onPick: () => void
-}) {
-  return (
-    <>
-      <div className="pop-head">Engine</div>
-      <div className="pop-stack">
-        <button
-          className={`pop-card ${settings.turboMode ? 'sel' : ''}`}
-          onClick={() => {
-            applyLive({ turboMode: true })
-            onPick()
-          }}
-        >
-          <b>⚡ Turbo {settings.realtimeProvider === 'openai' ? '(OpenAI)' : '(Gemini)'}</b>
-          <span>
-            Instant interpreter voice ·{' '}
-            {settings.realtimeProvider === 'openai' ? '~$2/hr' : '~$1.40/hr'}
-          </span>
-        </button>
-        <button
-          className={`pop-card ${!settings.turboMode ? 'sel' : ''}`}
-          onClick={() => {
-            applyLive({ turboMode: false })
-            onPick()
-          }}
-        >
-          <b>Standard</b>
-          <span>Soniox + translator · ~$0.12/hr</span>
-        </button>
-      </div>
     </>
   )
 }

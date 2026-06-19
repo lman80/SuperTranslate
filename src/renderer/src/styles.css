@@ -253,6 +253,32 @@ select {
   color: var(--ink);
 }
 
+/* engine + cost chips */
+.chip {
+  flex: 0 0 auto;
+  border: 1px solid var(--hairline);
+  background: var(--surface);
+  color: var(--ink-2);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.chip:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.chip.engine.turbo {
+  color: var(--turbo);
+  border-color: rgba(155, 140, 255, 0.45);
+  background: rgba(155, 140, 255, 0.1);
+}
+.chip.cost {
+  color: var(--ink-2);
+}
+
 /* ----- live control row specifics ----- */
 .rec {
   width: 8px;

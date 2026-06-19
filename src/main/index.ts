@@ -105,10 +105,10 @@ type WinMode =
 const MODE_SIZE: Record<WinMode, { w: number; h: number }> = {
   firstrun: { w: 460, h: 320 },
   setup: { w: 460, h: 600 },
-  idle: { w: 440, h: 56 },
-  'idle-menu': { w: 440, h: 248 }, // idle pill + an open popover (language / app / engine)
-  'live-collapsed': { w: 600, h: 150 },
-  'live-expanded': { w: 600, h: 400 },
+  idle: { w: 500, h: 56 },
+  'idle-menu': { w: 500, h: 248 }, // idle pill + an open popover (language / app)
+  'live-collapsed': { w: 640, h: 150 },
+  'live-expanded': { w: 640, h: 400 },
   mini: { w: 52, h: 52 } // collapsed-to-handle: stays on top but out of the way
 }
 const BAR_MODES = new Set<WinMode>([
@@ -592,7 +592,9 @@ ipcMain.handle('capture:start', async () => {
   )
   activeSettings = s
   running = true
-  warned80 = false
+  // Don't re-arm the 80% warning on a mid-month reinit (e.g. an engine toggle) if
+  // we're already past the threshold — only arm it when spend is still below 80%.
+  warned80 = s.monthlyBudgetUSD > 0 && totalUsd(await getUsage()) >= s.monthlyBudgetUSD * 0.8
   startAccrual()
   await emitUsage()
 
