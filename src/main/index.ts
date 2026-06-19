@@ -50,6 +50,7 @@ const sessions: Record<Source, SonioxSession | GeminiLiveSession | OpenAIRealtim
 let systemKind: 'soniox' | 'gemini' | 'openai' = 'soniox'
 let turboFinalizeTimer: ReturnType<typeof setTimeout> | null = null
 let macTap: MacSystemTap | null = null
+let tapMuted = false // the captured app's own output is silenced (so we can replay it quietly)
 let lastLevelSent = 0
 let running = false
 let activeSettings: Settings | null = null
@@ -120,6 +121,8 @@ const BAR_MODES = new Set<WinMode>([
 ])
 let currentMode: WinMode = 'idle'
 let currentDock: Dock = 'top-center'
+let liveCollapsedH = 184 // live-collapsed grows to fit the caption (set by the renderer)
+const COLLAPSED_MIN_H = 120
 let freeBounds: Settings['overlayBounds']
 let bootDisplayId: number | undefined // last-used display, applied before the window exists
 let suppressMovedUntil = 0
@@ -145,8 +148,14 @@ function activeWorkArea(): Electron.Rectangle {
 function sizeFor(mode: WinMode): { w: number; h: number } {
   const wa = activeWorkArea()
   const base = MODE_SIZE[mode]
+  let h = base.h
+  // The collapsed caption auto-sizes to its content so the translation is never cut off.
+  if (mode === 'live-collapsed') {
+    const max = Math.min(Math.round(wa.height * 0.65), 560)
+    h = Math.max(COLLAPSED_MIN_H, Math.min(liveCollapsedH, max))
+  }
   // Live height is clamped to the display so a short external screen can't push it off.
-  const h = BAR_MODES.has(mode) ? Math.min(base.h, wa.height - 24) : base.h
+  if (BAR_MODES.has(mode)) h = Math.min(h, wa.height - 24)
   return { w: base.w, h }
 }
 
@@ -179,7 +188,8 @@ function boundsFor(mode: WinMode, dock: Dock): Electron.Rectangle {
 // (idle <-> live <-> expanded); snap for setup/firstrun to avoid transparent-window flicker.
 function applyMode(mode: WinMode): void {
   if (!win || win.isDestroyed()) return
-  const animate = BAR_MODES.has(mode) && BAR_MODES.has(currentMode)
+  // Animate only on a real mode change; a same-mode resize (caption auto-height) snaps.
+  const animate = mode !== currentMode && BAR_MODES.has(mode) && BAR_MODES.has(currentMode)
   currentMode = mode
   const b = boundsFor(mode, currentDock)
   suppressMovedUntil = Date.now() + 450
@@ -547,6 +557,7 @@ function stopAccrual(): void {
 async function stopAll(): Promise<void> {
   macTap?.stop()
   macTap = null
+  tapMuted = false
   stopSession('mic')
   stopSession('system')
   stopAccrual()
@@ -609,6 +620,9 @@ ipcMain.handle('capture:start', async () => {
         if (!running) return
         if (!sessions.system) startSession('system', s)
         sessions.system?.sendAudio(pcm)
+        // When the source app is muted at the tap, replay it quietly in the renderer so
+        // the user still hears the call under a louder translation (per-app ducking).
+        if (tapMuted && win && !win.isDestroyed()) win.webContents.send('system:audio', pcm)
       },
       onLevel: (rms) => emitSystemLevel(rms),
       onError: (message) => {
@@ -617,6 +631,7 @@ ipcMain.handle('capture:start', async () => {
       },
       onMode: (mode) => {
         dbg(`tap mode=${mode}`)
+        tapMuted = mode === 'muted'
         send('system:mode', { mode })
       },
       onLog: (m) => dbg(`tap: ${m}`)
@@ -701,6 +716,12 @@ ipcMain.on('window:setMode', (_e, mode: WinMode) => {
   if (MODE_SIZE[mode]) applyMode(mode)
 })
 ipcMain.on('window:setDock', (_e, dock: Dock) => applyDock(dock))
+ipcMain.on('window:setCollapsedHeight', (_e, px: number) => {
+  const n = Math.round(px)
+  if (!Number.isFinite(n) || n <= 0 || n === liveCollapsedH) return
+  liveCollapsedH = n
+  if (currentMode === 'live-collapsed') applyMode('live-collapsed')
+})
 ipcMain.on('window:setPin', (_e, on: boolean) => {
   if (win && !win.isDestroyed()) win.setAlwaysOnTop(on, 'floating')
 })

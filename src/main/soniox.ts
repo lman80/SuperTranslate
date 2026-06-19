@@ -18,9 +18,20 @@ export interface SonioxConfig {
   endpointDelayMs?: number // max wait after a pause before finalizing (lower = faster, more splits)
 }
 
+// Emit a translatable chunk well before the speaker pauses, so long continuous
+// speech doesn't pile up into one enormous late block. We flush finalized text on
+// sentence punctuation, at a length cap, or after a short time cap.
+const MAX_CHUNK_CHARS = 90
+const MAX_CHUNK_MS = 4000
+// CJK enders need no trailing space; ASCII enders must be followed by space/end so
+// "3.14" / "Mr." don't split mid-token.
+const SENT_END = /[。！？…][”’"')\]）】»]*|[.!?]+[”’"')\]]*(?=\s|$)/
+
 export class SonioxSession {
   private ws: WebSocket | null = null
   private finalText = ''
+  private lastLanguage = '' // persists across messages; a chunk may finalize across several
+  private lastFlush = 0
   private keepalive: ReturnType<typeof setInterval> | null = null
   private stopped = false
 
@@ -92,21 +103,71 @@ export class SonioxSession {
     if (!Array.isArray(msg.tokens)) return
 
     let partialTail = ''
-    let language = ''
+    let endpoint = false
     for (const t of msg.tokens) {
-      if (t.language) language = t.language
+      if (t.language) this.lastLanguage = t.language
       if (t.text === '<end>') {
-        const text = this.finalText.trim()
-        this.finalText = ''
-        if (text) this.cb.onFinal(text, language)
+        endpoint = true
         continue
       }
       if (t.is_final) this.finalText += t.text
       else partialTail += t.text
     }
 
+    // Chunk finalized text promptly (sentences / length / time), and force-flush the
+    // remainder when Soniox signals an endpoint (a real pause). Tag with the last
+    // detected language (a chunk can span several messages, some without a language).
+    this.flush(this.lastLanguage, endpoint)
+
     const live = (this.finalText + partialTail).trim()
     if (live) this.cb.onPartial(live)
+  }
+
+  private flush(language: string, force: boolean): void {
+    let flushedAny = false
+    const emit = (chunk: string): void => {
+      const c = chunk.trim()
+      if (c) {
+        this.cb.onFinal(c, language)
+        flushedAny = true
+      }
+    }
+
+    // 1) Complete sentences.
+    for (;;) {
+      const m = SENT_END.exec(this.finalText)
+      if (!m) break
+      let end = m.index + m[0].length
+      while (end < this.finalText.length && /\s/.test(this.finalText[end])) end++
+      emit(this.finalText.slice(0, end))
+      this.finalText = this.finalText.slice(end)
+    }
+
+    // 2) Length cap (no punctuation but getting long).
+    while (this.finalText.length > MAX_CHUNK_CHARS) {
+      let cut = this.finalText.lastIndexOf(' ', MAX_CHUNK_CHARS)
+      if (cut < MAX_CHUNK_CHARS * 0.5) cut = MAX_CHUNK_CHARS // CJK / no good break → hard cut
+      emit(this.finalText.slice(0, cut))
+      this.finalText = this.finalText.slice(cut)
+    }
+
+    // 3a) Endpoint (real pause): flush whatever's left.
+    if (force && this.finalText.trim()) {
+      emit(this.finalText)
+      this.finalText = ''
+    } else if (this.finalText.trim()) {
+      // 3b) Time cap: don't let a rambling speaker hold the line for too long.
+      const now = Date.now()
+      if (this.lastFlush === 0) this.lastFlush = now
+      if (now - this.lastFlush > MAX_CHUNK_MS) {
+        let cut = this.finalText.lastIndexOf(' ')
+        if (cut <= 0) cut = this.finalText.length
+        emit(this.finalText.slice(0, cut))
+        this.finalText = this.finalText.slice(cut)
+      }
+    }
+
+    if (flushedAny) this.lastFlush = Date.now()
   }
 
   sendAudio(buffer: ArrayBuffer | Uint8Array): void {
@@ -129,5 +190,7 @@ export class SonioxSession {
     }
     this.ws = null
     this.finalText = ''
+    this.lastLanguage = ''
+    this.lastFlush = 0
   }
 }

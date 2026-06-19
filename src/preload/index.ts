@@ -51,6 +51,7 @@ const api = {
     subscribe('tts:play', cb),
   onTurboAudio: (cb: (p: { data: string }) => void) => subscribe('turbo:audio', cb),
   onSystemLevel: (cb: (p: { rms: number }) => void) => subscribe('system:level', cb),
+  onSystemAudio: (cb: (pcm: Uint8Array) => void) => subscribe('system:audio', cb),
   onSystemMode: (cb: (p: { mode: 'muted' | 'overlap' }) => void) => subscribe('system:mode', cb),
   onBudget: (
     cb: (p: { reached: boolean; warning?: boolean; spent: number; budget: number }) => void
@@ -70,6 +71,7 @@ const api = {
   ) => ipcRenderer.send('window:setMode', mode),
   setDock: (dock: 'top-center' | 'bottom-center' | 'top-left' | 'top-right' | 'free') =>
     ipcRenderer.send('window:setDock', dock),
+  setCollapsedHeight: (px: number) => ipcRenderer.send('window:setCollapsedHeight', px),
   setPin: (on: boolean) => ipcRenderer.send('window:setPin', on),
   onDock: (cb: (p: { dock: string }) => void) => subscribe('window:dock', cb),
   openExternal: (url: string) => ipcRenderer.send('open-external', url),

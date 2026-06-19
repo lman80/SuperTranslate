@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { startCapture, setMicMuted, setSystemMuted, type CaptureResult } from './audio'
 
 type Source = 'mic' | 'system'
@@ -25,6 +25,7 @@ interface Settings {
   elevenLabsApiKey: string
   elevenLabsVoiceId: string
   voiceVolume: number
+  backgroundVolume: number
   ttsRate: number
   responseSpeed: 'fast' | 'balanced' | 'accurate'
   turboMode: boolean
@@ -138,6 +139,11 @@ export default function App() {
   const turboCtxRef = useRef<AudioContext | null>(null)
   const turboGainRef = useRef<GainNode | null>(null)
   const turboNextTimeRef = useRef(0)
+  const bgCtxRef = useRef<AudioContext | null>(null)
+  const bgGainRef = useRef<GainNode | null>(null)
+  const bgNextTimeRef = useRef(0)
+  const backgroundVolumeRef = useRef(0.3)
+  const bgDuckedRef = useRef(false)
   const ttsGuardTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const turboGuardTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const levelClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -155,7 +161,10 @@ export default function App() {
   }, [setupOpen])
   useEffect(() => {
     settingsRef.current = settings
-    if (settings) voiceVolumeRef.current = settings.voiceVolume ?? 1
+    if (settings) {
+      voiceVolumeRef.current = settings.voiceVolume ?? 1
+      backgroundVolumeRef.current = settings.backgroundVolume ?? 0.3
+    }
   }, [settings])
 
   const flash = useCallback((msg: string) => {
@@ -238,28 +247,51 @@ export default function App() {
     }
   }, [])
 
-  // ---- capture-loop guards (mute mic/system while a dub plays) ----
+  // Background monitor gain (the quietly-replayed captured app), ducked further while
+  // the translation is speaking so the translation clearly stands out.
+  const applyBgGain = useCallback(() => {
+    if (bgGainRef.current) {
+      bgGainRef.current.gain.value = backgroundVolumeRef.current * (bgDuckedRef.current ? 0.3 : 1)
+    }
+  }, [])
+
+  // ---- capture-loop guards (mute mic/system + duck background while a dub plays) ----
   const guardOn = useCallback(() => {
     setMicMuted(true)
     setSystemMuted(true)
+    bgDuckedRef.current = true
+    applyBgGain()
     if (ttsGuardTimer.current) clearTimeout(ttsGuardTimer.current)
     ttsGuardTimer.current = setTimeout(() => {
       setMicMuted(false)
       setSystemMuted(false)
+      bgDuckedRef.current = false
+      applyBgGain()
     }, 20000)
-  }, [])
+  }, [applyBgGain])
   const guardOff = useCallback(() => {
     if (ttsGuardTimer.current) clearTimeout(ttsGuardTimer.current)
     ttsGuardTimer.current = setTimeout(() => {
       setMicMuted(false)
       setSystemMuted(false)
+      bgDuckedRef.current = false
+      applyBgGain()
     }, 400)
-  }, [])
-  const turboGuard = useCallback((msUntilDone: number) => {
-    setMicMuted(true)
-    if (turboGuardTimer.current) clearTimeout(turboGuardTimer.current)
-    turboGuardTimer.current = setTimeout(() => setMicMuted(false), msUntilDone + 400)
-  }, [])
+  }, [applyBgGain])
+  const turboGuard = useCallback(
+    (msUntilDone: number) => {
+      setMicMuted(true)
+      bgDuckedRef.current = true
+      applyBgGain()
+      if (turboGuardTimer.current) clearTimeout(turboGuardTimer.current)
+      turboGuardTimer.current = setTimeout(() => {
+        setMicMuted(false)
+        bgDuckedRef.current = false
+        applyBgGain()
+      }, msUntilDone + 400)
+    },
+    [applyBgGain]
+  )
 
   const speak = useCallback(
     (text: string, lang: string) => {
@@ -286,6 +318,52 @@ export default function App() {
       window.speechSynthesis.speak(u)
     },
     [guardOn, guardOff]
+  )
+
+  // Background monitor: replay the captured (muted) app quietly so the user still
+  // hears the call under the translation. 16kHz mono PCM forwarded from main.
+  const ensureBgCtx = useCallback((): AudioContext => {
+    if (!bgCtxRef.current) {
+      const ctx = new AudioContext({ sampleRate: 16000 })
+      const gain = ctx.createGain()
+      gain.gain.value = backgroundVolumeRef.current
+      gain.connect(ctx.destination)
+      bgCtxRef.current = ctx
+      bgGainRef.current = gain
+      bgNextTimeRef.current = ctx.currentTime
+    }
+    return bgCtxRef.current
+  }, [])
+  const playBgPcm = useCallback(
+    (bytes: Uint8Array) => {
+      try {
+        // Don't replay our own background into the mic; and never recreate the context
+        // after Stop (only doStart creates it) — both would cause echo / a ghost context.
+        if (settingsRef.current?.captureMic) return
+        const ctx = bgCtxRef.current
+        if (!ctx || !bgGainRef.current) return
+        const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+        const count = Math.floor(u8.byteLength / 2)
+        if (!count) return
+        if (ctx.state === 'suspended') void ctx.resume()
+        applyBgGain()
+        const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength)
+        const f32 = new Float32Array(count)
+        for (let i = 0; i < count; i++) f32[i] = dv.getInt16(i * 2, true) / 32768
+        const buf = ctx.createBuffer(1, count, 16000)
+        buf.copyToChannel(f32, 0)
+        const node = ctx.createBufferSource()
+        node.buffer = buf
+        node.connect(bgGainRef.current!)
+        let startAt = Math.max(ctx.currentTime, bgNextTimeRef.current)
+        if (startAt - ctx.currentTime > 0.6) startAt = ctx.currentTime // resync if latency grows
+        node.start(startAt)
+        bgNextTimeRef.current = startAt + buf.duration
+      } catch {
+        /* ignore */
+      }
+    },
+    [applyBgGain]
   )
 
   // Turbo audio graph: gain (0–2×, can boost past 100%) → limiter → speakers.
@@ -439,6 +517,9 @@ export default function App() {
       if (levelClearTimer.current) clearTimeout(levelClearTimer.current)
       levelClearTimer.current = setTimeout(() => setSystemLevel(0), 500)
     })
+    const offSysAudio = window.api.onSystemAudio((pcm) => {
+      if (runningRef.current) playBgPcm(pcm)
+    })
     const offSysMode = window.api.onSystemMode(({ mode: m }) => {
       if (m === 'muted') flash('Source muted — you’ll hear only the translation ✓')
       else flash('Capturing this app — lower its volume to reduce overlap')
@@ -460,11 +541,12 @@ export default function App() {
       offUsage()
       offBudget()
       offSysLevel()
+      offSysAudio()
       offSysMode()
       offStatus()
       offDock()
     }
-  }, [flash, speak, guardOn, guardOff, playTurboPcm, turboGuard, addBanner])
+  }, [flash, speak, guardOn, guardOff, playTurboPcm, turboGuard, addBanner, playBgPcm])
 
   // Auto-scroll the expanded transcript only when pinned to bottom.
   useEffect(() => {
@@ -486,6 +568,10 @@ export default function App() {
       if (s.turboMode) {
         void ensureTurboCtx().resume()
       }
+      // Prepare the background monitor (quiet replay of the captured app).
+      bgDuckedRef.current = false
+      void ensureBgCtx().resume()
+      applyBgGain()
       captureRef.current = await startCapture({
         captureSystemAudio: !!info?.captureSystemInRenderer,
         captureMic: s.captureMic,
@@ -504,9 +590,10 @@ export default function App() {
     } finally {
       setBusy(false)
     }
-  }, [addBanner, removeBanner, ensureTurboCtx])
+  }, [addBanner, removeBanner, ensureTurboCtx, ensureBgCtx, applyBgGain])
 
   const doStop = useCallback(async () => {
+    runningRef.current = false // synchronous: stop audio handlers from acting during teardown
     captureRef.current?.stop()
     captureRef.current = null
     try {
@@ -520,6 +607,10 @@ export default function App() {
       turboCtxRef.current?.close().catch(() => undefined)
       turboCtxRef.current = null
       turboGainRef.current = null
+      bgCtxRef.current?.close().catch(() => undefined)
+      bgCtxRef.current = null
+      bgGainRef.current = null
+      bgDuckedRef.current = false
     } catch {
       /* ignore */
     }
@@ -608,6 +699,16 @@ export default function App() {
     setSettings((prev) => (prev ? { ...prev, voiceVolume: v } : prev))
     void window.api.saveSettings({ voiceVolume: v })
   }, [])
+
+  const setBackgroundVolume = useCallback(
+    (v: number) => {
+      backgroundVolumeRef.current = v
+      applyBgGain()
+      setSettings((prev) => (prev ? { ...prev, backgroundVolume: v } : prev))
+      void window.api.saveSettings({ backgroundVolume: v })
+    },
+    [applyBgGain]
+  )
 
   const setFontScale = useCallback((v: number) => {
     const clamped = Math.max(0.85, Math.min(1.9, v))
@@ -1060,6 +1161,25 @@ function CaptionStack({
   const everShownRef = useRef(false)
   if (entries.length > 0 || partialText) everShownRef.current = true
 
+  // Auto-size the collapsed window to fit the caption so the translation is never cut
+  // off. Measure the natural content height and ask main to resize (threshold-guarded).
+  const measureRef = useRef<HTMLDivElement | null>(null)
+  const lastReportedH = useRef(0)
+  const rafRef = useRef(0)
+  useLayoutEffect(() => {
+    if (expanded) return
+    const el = measureRef.current
+    if (!el) return
+    const desired = 34 + el.offsetHeight + 18 + 2 // control row + content + padding + border
+    if (Math.abs(desired - lastReportedH.current) < 8) return // ignore sub-line churn
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    rafRef.current = requestAnimationFrame(() => {
+      lastReportedH.current = desired
+      window.api.setCollapsedHeight(desired)
+    })
+  })
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current) }, [])
+
   // ---- Expanded: the full scrollable transcript ----
   if (expanded) {
     return (
@@ -1154,23 +1274,25 @@ function CaptionStack({
 
   return (
     <div className="capstack reading">
-      {incoming && <div className="cue-incoming">{incoming}</div>}
-      {hero && (
-        <div className={`cue hero ${hero.source}`}>
-          <div className="cue-body">
-            {hero.translation ? (
-              <div className="cue-trans">{hero.translation}</div>
-            ) : hero.error ? (
-              <div className="cue-err">{hero.error}</div>
-            ) : hero.note ? (
-              <div className="cue-note">{hero.note}</div>
-            ) : (
-              <Typing />
-            )}
-            {showOriginal && hero.original && <div className="cue-orig">{hero.original}</div>}
+      <div className="reading-inner" ref={measureRef}>
+        {incoming && <div className="cue-incoming">{incoming}</div>}
+        {hero && (
+          <div className={`cue hero ${hero.source}`}>
+            <div className="cue-body">
+              {hero.translation ? (
+                <div className="cue-trans">{hero.translation}</div>
+              ) : hero.error ? (
+                <div className="cue-err">{hero.error}</div>
+              ) : hero.note ? (
+                <div className="cue-note">{hero.note}</div>
+              ) : (
+                <Typing />
+              )}
+              {showOriginal && hero.original && <div className="cue-orig">{hero.original}</div>}
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   )
 }
@@ -1589,9 +1711,22 @@ function SetupSheet({
             value={settings.voiceVolume}
             onChange={(e) => applyLive({ voiceVolume: Number(e.target.value) })}
           />
+          <label className="slabel">
+            Background (the call, under the translation) {Math.round(settings.backgroundVolume * 100)}
+            %
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={settings.backgroundVolume}
+            onChange={(e) => applyLive({ backgroundVolume: Number(e.target.value) })}
+          />
           <p className="hint">
-            Above 100% boosts the Turbo voice — turn your Mac’s system volume down and push
-            this up so you hear mostly the translation.
+            For native apps (Zoom/Teams) we mute the app and replay it at this volume under the
+            translation — turn it down and push Voice up to hear mostly the translation. It ducks
+            automatically while the translation speaks. (Browsers: lower the browser’s own volume.)
           </p>
         </Section>
 

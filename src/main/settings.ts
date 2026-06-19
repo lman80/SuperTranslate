@@ -24,7 +24,8 @@ export interface Settings {
   ttsEngine: 'system' | 'elevenlabs' // 'system' = free local voice; 'elevenlabs' = premium
   elevenLabsApiKey: string
   elevenLabsVoiceId: string
-  voiceVolume: number // translation voice playback volume (0–1.5, 1 = normal)
+  voiceVolume: number // translation voice playback volume (0–2, 1 = normal, >1 boosts)
+  backgroundVolume: number // how loud the captured app plays back under the translation (0–1)
   ttsRate: number // playback speed of the spoken translation (1 = normal)
   responseSpeed: 'fast' | 'balanced' | 'accurate' // how long to wait after a pause before finalizing
   turboMode: boolean // real-time speech-to-speech for the other person
@@ -57,6 +58,7 @@ const defaults: Settings = {
   elevenLabsApiKey: '',
   elevenLabsVoiceId: '',
   voiceVolume: 1,
+  backgroundVolume: 0.3,
   ttsRate: 1.25,
   responseSpeed: 'fast',
   turboMode: false,

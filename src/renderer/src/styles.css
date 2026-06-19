@@ -477,8 +477,14 @@ select {
    speech is only a faint hint above it (never demotes the line you're reading). */
 .capstack.reading {
   justify-content: flex-end;
+  gap: 0;
+  overflow-y: auto;
+}
+.reading-inner {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
   gap: 5px;
-  overflow: hidden;
 }
 .cue-incoming {
   flex: 0 0 auto;
@@ -495,7 +501,9 @@ select {
   font-size: calc(23px * var(--font-scale));
   font-weight: 650;
   line-height: 1.3;
-  -webkit-line-clamp: 2; /* 2 lines always fit the 184px reading view at any font scale */
+  display: block; /* show the FULL translation — the window grows to fit it, never clips */
+  -webkit-line-clamp: unset;
+  overflow: visible;
 }
 .cue.hero .cue-orig {
   margin-top: 4px;
