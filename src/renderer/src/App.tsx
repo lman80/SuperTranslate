@@ -125,6 +125,7 @@ export default function App() {
   const [setupOpen, setSetupOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [popover, setPopover] = useState<Popover>(null)
+  const [minimized, setMinimized] = useState(false)
 
   const settingsRef = useRef<Settings | null>(null)
   const runningRef = useRef(false)
@@ -207,13 +208,15 @@ export default function App() {
     ? 'firstrun'
     : setupOpen
       ? 'setup'
-      : running
-        ? historyOpen
-          ? 'live-expanded'
-          : 'live-collapsed'
-        : popover
-          ? 'idle-menu'
-          : 'idle'
+      : minimized
+        ? 'mini'
+        : running
+          ? historyOpen
+            ? 'live-expanded'
+            : 'live-collapsed'
+          : popover
+            ? 'idle-menu'
+            : 'idle'
   useEffect(() => {
     if (settingsRef.current) window.api.setMode(mode)
   }, [mode])
@@ -286,21 +289,37 @@ export default function App() {
     [guardOn, guardOff]
   )
 
-  const playTurboPcm = useCallback((base64: string) => {
-    try {
-      const bin = atob(base64)
-      const bytes = new Uint8Array(bin.length)
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-      const int16 = new Int16Array(bytes.buffer, 0, Math.floor(bytes.length / 2))
-      if (!turboCtxRef.current) {
-        turboCtxRef.current = new AudioContext({ sampleRate: 24000 })
-        turboNextTimeRef.current = turboCtxRef.current.currentTime
-        turboGainRef.current = turboCtxRef.current.createGain()
-        turboGainRef.current.connect(turboCtxRef.current.destination)
-      }
-      const ctx = turboCtxRef.current
-      if (ctx.state === 'suspended') void ctx.resume()
-      turboGainRef.current!.gain.value = voiceVolumeRef.current
+  // Turbo audio graph: gain (0–2×, can boost past 100%) → limiter → speakers.
+  // The limiter keeps a boosted voice loud without harsh clipping.
+  const ensureTurboCtx = useCallback((): AudioContext => {
+    if (!turboCtxRef.current) {
+      const ctx = new AudioContext({ sampleRate: 24000 })
+      const gain = ctx.createGain()
+      const limiter = ctx.createDynamicsCompressor()
+      limiter.threshold.value = -2
+      limiter.knee.value = 0
+      limiter.ratio.value = 20
+      limiter.attack.value = 0.003
+      limiter.release.value = 0.12
+      gain.connect(limiter)
+      limiter.connect(ctx.destination)
+      turboCtxRef.current = ctx
+      turboGainRef.current = gain
+      turboNextTimeRef.current = ctx.currentTime
+    }
+    return turboCtxRef.current
+  }, [])
+
+  const playTurboPcm = useCallback(
+    (base64: string) => {
+      try {
+        const bin = atob(base64)
+        const bytes = new Uint8Array(bin.length)
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+        const int16 = new Int16Array(bytes.buffer, 0, Math.floor(bytes.length / 2))
+        const ctx = ensureTurboCtx()
+        if (ctx.state === 'suspended') void ctx.resume()
+        turboGainRef.current!.gain.value = voiceVolumeRef.current
       const f32 = new Float32Array(int16.length)
       for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768
       const buf = ctx.createBuffer(1, f32.length, 24000)
@@ -311,10 +330,12 @@ export default function App() {
       const startAt = Math.max(ctx.currentTime, turboNextTimeRef.current)
       node.start(startAt)
       turboNextTimeRef.current = startAt + buf.duration
-    } catch {
-      /* ignore */
-    }
-  }, [])
+      } catch {
+        /* ignore */
+      }
+    },
+    [ensureTurboCtx]
+  )
 
   // ---- subscribe to all main events (once) ----
   useEffect(() => {
@@ -346,6 +367,7 @@ export default function App() {
       }
     )
     const offTurbo = window.api.onTurboAudio(({ data }) => {
+      if (!runningRef.current) return // ignore buffered audio arriving during teardown
       playTurboPcm(data)
       const ctx = turboCtxRef.current
       const msLeft = ctx ? Math.max(0, (turboNextTimeRef.current - ctx.currentTime) * 1000) : 600
@@ -463,13 +485,7 @@ export default function App() {
     try {
       const info = (await window.api.startCapture()) as { captureSystemInRenderer?: boolean }
       if (s.turboMode) {
-        if (!turboCtxRef.current) {
-          turboCtxRef.current = new AudioContext({ sampleRate: 24000 })
-          turboNextTimeRef.current = turboCtxRef.current.currentTime
-          turboGainRef.current = turboCtxRef.current.createGain()
-          turboGainRef.current.connect(turboCtxRef.current.destination)
-        }
-        void turboCtxRef.current.resume()
+        void ensureTurboCtx().resume()
       }
       captureRef.current = await startCapture({
         captureSystemAudio: !!info?.captureSystemInRenderer,
@@ -489,7 +505,7 @@ export default function App() {
     } finally {
       setBusy(false)
     }
-  }, [addBanner, removeBanner])
+  }, [addBanner, removeBanner, ensureTurboCtx])
 
   const doStop = useCallback(async () => {
     captureRef.current?.stop()
@@ -658,6 +674,12 @@ export default function App() {
           togglePin={togglePin}
           onClose={closeSetup}
         />
+      ) : minimized ? (
+        <MiniHandle
+          live={running}
+          dot={masterDot}
+          onRestore={() => setMinimized(false)}
+        />
       ) : (
         <div className={`bar ${running ? 'live' : 'idle'}`}>
           {running ? (
@@ -675,6 +697,8 @@ export default function App() {
               onPopover={(p) => setPopover((cur) => (cur === p ? null : p))}
               onToggleHistory={() => setHistoryOpen((v) => !v)}
               onSetup={() => setSetupOpen(true)}
+              onMinimize={() => setMinimized(true)}
+              onQuit={() => window.api.windowControl('close')}
             />
           ) : (
             <IdleRow
@@ -687,6 +711,8 @@ export default function App() {
               busy={busy}
               onPopover={(p) => setPopover((cur) => (cur === p ? null : p))}
               onSetup={() => setSetupOpen(true)}
+              onMinimize={() => setMinimized(true)}
+              onQuit={() => window.api.windowControl('close')}
             />
           )}
 
@@ -739,7 +765,7 @@ export default function App() {
         </div>
       )}
 
-      {toast && mode !== 'idle' && <div className="toast">{toast}</div>}
+      {toast && mode !== 'idle' && mode !== 'mini' && <div className="toast">{toast}</div>}
     </div>
   )
 }
@@ -767,7 +793,9 @@ function IdleRow({
   onStart,
   busy,
   onPopover,
-  onSetup
+  onSetup,
+  onMinimize,
+  onQuit
 }: {
   settings: Settings
   ready: boolean
@@ -778,6 +806,8 @@ function IdleRow({
   busy: boolean
   onPopover: (p: Popover) => void
   onSetup: () => void
+  onMinimize: () => void
+  onQuit: () => void
 }) {
   // A blocking banner (e.g. budget paused) takes over the slim pill.
   if (banner) {
@@ -815,10 +845,47 @@ function IdleRow({
           ⚙ Finish setup
         </button>
       )}
+      <WindowControls onSetup={onSetup} onMinimize={onMinimize} onQuit={onQuit} />
+    </div>
+  )
+}
+
+// Consistent right-side window cluster: Setup · Minimize · Quit.
+function WindowControls({
+  onSetup,
+  onMinimize,
+  onQuit
+}: {
+  onSetup: () => void
+  onMinimize: () => void
+  onQuit: () => void
+}) {
+  return (
+    <div className="wctl">
       <button className="iconbtn" title="Setup" onClick={onSetup}>
         ⚙
       </button>
+      <button className="iconbtn" title="Hide (keep running)" onClick={onMinimize}>
+        –
+      </button>
+      <button className="iconbtn quit" title="Quit SuperTranslate" onClick={onQuit}>
+        ✕
+      </button>
     </div>
+  )
+}
+
+/* ============================ Mini handle ============================ */
+// Collapsed state: a tiny always-on-top dot. Pulses green while still translating.
+function MiniHandle({ live, dot, onRestore }: { live: boolean; dot: string; onRestore: () => void }) {
+  return (
+    <button
+      className="mini-handle"
+      title={live ? 'Translating — click to show' : 'Show SuperTranslate'}
+      onClick={onRestore}
+    >
+      <span className={`dot ${dot}`} />
+    </button>
   )
 }
 
@@ -836,7 +903,9 @@ function LiveControlRow({
   onFont,
   onPopover,
   onToggleHistory,
-  onSetup
+  onSetup,
+  onMinimize,
+  onQuit
 }: {
   settings: Settings
   dir: string
@@ -851,6 +920,8 @@ function LiveControlRow({
   onPopover: (p: Popover) => void
   onToggleHistory: () => void
   onSetup: () => void
+  onMinimize: () => void
+  onQuit: () => void
 }) {
   return (
     <div className="row live-row">
@@ -875,12 +946,12 @@ function LiveControlRow({
         >
           {settings.showOriginal ? '👁' : '⊘'}
         </button>
-        <div className="vol" title="Voice volume">
+        <div className="vol" title={`Voice volume ${Math.round(settings.voiceVolume * 100)}%`}>
           <span>🔊</span>
           <input
             type="range"
             min={0}
-            max={1.5}
+            max={2}
             step={0.05}
             value={settings.voiceVolume}
             onChange={(e) => onVolume(Number(e.target.value))}
@@ -903,9 +974,7 @@ function LiveControlRow({
       >
         {historyOpen ? '⌃' : '⌄'}
       </button>
-      <button className="iconbtn" title="Setup" onClick={onSetup}>
-        ⚙
-      </button>
+      <WindowControls onSetup={onSetup} onMinimize={onMinimize} onQuit={onQuit} />
     </div>
   )
 }
@@ -1006,6 +1075,9 @@ function PopoverShell({ children, onClose }: { children: React.ReactNode; onClos
   return (
     <div className="pop-backdrop" onMouseDown={onClose}>
       <div className="popover" onMouseDown={(e) => e.stopPropagation()}>
+        <button className="pop-close" onClick={onClose} title="Close">
+          ✕
+        </button>
         {children}
       </div>
     </div>
@@ -1441,11 +1513,15 @@ function SetupSheet({
           <input
             type="range"
             min={0}
-            max={1.5}
+            max={2}
             step={0.05}
             value={settings.voiceVolume}
             onChange={(e) => applyLive({ voiceVolume: Number(e.target.value) })}
           />
+          <p className="hint">
+            Above 100% boosts the Turbo voice — turn your Mac’s system volume down and push
+            this up so you hear mostly the translation.
+          </p>
         </Section>
 
         <Section title="Audio & display">

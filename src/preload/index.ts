@@ -58,7 +58,14 @@ const api = {
   windowControl: (action: 'minimize' | 'close' | 'pin' | 'unpin') =>
     ipcRenderer.send('window:control', action),
   setMode: (
-    mode: 'firstrun' | 'setup' | 'idle' | 'idle-menu' | 'live-collapsed' | 'live-expanded'
+    mode:
+      | 'firstrun'
+      | 'setup'
+      | 'idle'
+      | 'idle-menu'
+      | 'live-collapsed'
+      | 'live-expanded'
+      | 'mini'
   ) => ipcRenderer.send('window:setMode', mode),
   setDock: (dock: 'top-center' | 'bottom-center' | 'top-left' | 'top-right' | 'free') =>
     ipcRenderer.send('window:setDock', dock),

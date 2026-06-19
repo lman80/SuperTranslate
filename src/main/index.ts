@@ -94,20 +94,29 @@ process.on('unhandledRejection', (reason) => {
 // ---- Overlay window sizing/positioning ----
 // The window is a compact caption overlay that MORPHS between modes; the main process
 // owns all sizing so the window is never bigger than the current mode needs.
-type WinMode = 'firstrun' | 'setup' | 'idle' | 'idle-menu' | 'live-collapsed' | 'live-expanded'
+type WinMode =
+  | 'firstrun'
+  | 'setup'
+  | 'idle'
+  | 'idle-menu'
+  | 'live-collapsed'
+  | 'live-expanded'
+  | 'mini'
 const MODE_SIZE: Record<WinMode, { w: number; h: number }> = {
   firstrun: { w: 460, h: 320 },
   setup: { w: 460, h: 600 },
-  idle: { w: 400, h: 56 },
-  'idle-menu': { w: 400, h: 248 }, // idle pill + an open popover (language / app / engine)
+  idle: { w: 440, h: 56 },
+  'idle-menu': { w: 440, h: 248 }, // idle pill + an open popover (language / app / engine)
   'live-collapsed': { w: 600, h: 150 },
-  'live-expanded': { w: 600, h: 400 }
+  'live-expanded': { w: 600, h: 400 },
+  mini: { w: 52, h: 52 } // collapsed-to-handle: stays on top but out of the way
 }
 const BAR_MODES = new Set<WinMode>([
   'idle',
   'idle-menu',
   'live-collapsed',
-  'live-expanded'
+  'live-expanded',
+  'mini'
 ])
 let currentMode: WinMode = 'idle'
 let currentDock: Dock = 'top-center'
@@ -197,7 +206,7 @@ function createWindow(boot: { mode: WinMode; dock: Dock }): void {
   const initial = boundsFor(boot.mode, boot.dock)
   win = new BrowserWindow({
     ...initial,
-    minWidth: 300,
+    minWidth: 52, // must allow the 52px 'mini' handle (app drives all sizing; resizable:false)
     minHeight: 52,
     resizable: false,
     show: false,

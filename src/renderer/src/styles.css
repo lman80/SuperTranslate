@@ -190,6 +190,16 @@ select {
 .iconbtn.on {
   color: var(--accent);
 }
+.iconbtn.quit:hover {
+  background: rgba(255, 107, 107, 0.22);
+  color: #ff8c8c;
+}
+.wctl {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: 0 0 auto;
+}
 .mini {
   border: 1px solid var(--hairline);
   background: var(--surface);
@@ -577,6 +587,44 @@ select {
 .bar.live .popover {
   top: 40px;
 }
+.pop-close {
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  border: none;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 12px;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  z-index: 2;
+}
+.pop-close:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* mini (collapsed) handle — fills the tiny 52px window */
+.mini-handle {
+  -webkit-app-region: no-drag; /* must be clickable to restore (drag region can eat clicks) */
+  width: 100vw;
+  height: 100vh;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  background: var(--bar-bg);
+  display: grid;
+  place-items: center;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  transition: transform 0.12s;
+}
+.mini-handle:hover {
+  transform: scale(1.06);
+}
+.mini-handle .dot {
+  width: 13px;
+  height: 13px;
+}
 @keyframes rise2 {
   from {
     opacity: 0;
@@ -596,6 +644,7 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  padding-right: 22px; /* clear the absolute ✕ close button */
 }
 .pop-refresh {
   border: none;
