@@ -107,7 +107,7 @@ const MODE_SIZE: Record<WinMode, { w: number; h: number }> = {
   setup: { w: 460, h: 600 },
   idle: { w: 500, h: 56 },
   'idle-menu': { w: 500, h: 248 }, // idle pill + an open popover (language / app)
-  'live-collapsed': { w: 640, h: 150 },
+  'live-collapsed': { w: 640, h: 184 }, // taller so the translation is comfortable to read
   'live-expanded': { w: 640, h: 400 },
   mini: { w: 52, h: 52 } // collapsed-to-handle: stays on top but out of the way
 }
@@ -318,7 +318,9 @@ function startRealtimeSystemSession(s: Settings): void {
     send('caption:partial', { source: 'system', text: '' })
     if (o || tr) {
       const id = `turbo-${Date.now()}-${turnSeq++}`
-      send('caption:final', { id, source: 'system', original: o, sourceLang: s.theirLanguage, targetLang })
+      // Carry the translation on the final event itself so the renderer never paints an
+      // empty (untranslated) entry between the two sends — no caption flicker per turn.
+      send('caption:final', { id, source: 'system', original: o, sourceLang: s.theirLanguage, targetLang, translation: tr })
       send('caption:translation', { id, translation: tr, final: true, source: 'system', targetLang })
     }
   }

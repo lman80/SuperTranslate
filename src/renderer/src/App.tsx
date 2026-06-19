@@ -43,7 +43,6 @@ interface Entry {
   translation: string
   note?: string
   error?: string
-  partialText?: string
 }
 interface UsageState {
   spent: number
@@ -346,7 +345,7 @@ export default function App() {
       setEntries((prev) =>
         [
           ...prev,
-          { id: p.id, source: p.source, original: p.original, translation: '' }
+          { id: p.id, source: p.source, original: p.original, translation: p.translation ?? '' }
         ].slice(-300)
       )
       setPartial((prev) => ({ ...prev, [p.source]: '' }))
@@ -652,19 +651,6 @@ export default function App() {
   const bannerList = Object.entries(banners)
   const latestBanner = bannerList[bannerList.length - 1]
 
-  // Build the caption cue list (finalized entries + the current live partial).
-  const cues: Entry[] = [...entries]
-  const partialText = partial.system || partial.mic
-  if (partialText) {
-    cues.push({
-      id: '__partial',
-      source: partial.system ? 'system' : 'mic',
-      original: '',
-      translation: '',
-      partialText
-    })
-  }
-
   const closePopover = (): void => setPopover(null)
 
   return (
@@ -736,7 +722,9 @@ export default function App() {
 
           {running && (
             <CaptionStack
-              cues={cues}
+              entries={entries}
+              partial={partial}
+              turbo={settings.turboMode}
               expanded={historyOpen}
               showOriginal={settings.showOriginal}
               feedRef={feedRef}
@@ -1037,22 +1025,85 @@ function LiveControlRow({
 }
 
 /* ============================ Caption stack ============================ */
+const Typing = (): React.ReactElement => (
+  <div className="typing">
+    <i />
+    <i />
+    <i />
+  </div>
+)
+const hasText = (e?: Entry): boolean => !!e && !!(e.translation || e.error || e.note)
+
 function CaptionStack({
-  cues,
+  entries,
+  partial,
+  turbo,
   expanded,
   showOriginal,
   feedRef,
   onScroll,
   appName
 }: {
-  cues: Entry[]
+  entries: Entry[]
+  partial: { mic: string; system: string }
+  turbo: boolean
   expanded: boolean
   showOriginal: boolean
   feedRef: React.RefObject<HTMLDivElement | null>
   onScroll: () => void
   appName: string
 }) {
-  if (cues.length === 0) {
+  const partialText = partial.system || partial.mic
+  const partialSource: Source = partial.system ? 'system' : 'mic'
+  // Once any content has appeared, never flash back to the "Listening…" empty state
+  // (the finalize sequence briefly empties entries/partial between IPC events).
+  const everShownRef = useRef(false)
+  if (entries.length > 0 || partialText) everShownRef.current = true
+
+  // ---- Expanded: the full scrollable transcript ----
+  if (expanded) {
+    return (
+      <div className="capstack expanded" ref={feedRef} onScroll={onScroll}>
+        {entries.length === 0 && !partialText && (
+          <span className="cap-empty">Listening to {appName || 'the selected app'}…</span>
+        )}
+        {entries.map((e, i) => (
+          <div key={e.id} className={`cue ${e.source} ${i === entries.length - 1 && !partialText ? 'live' : 'past'}`}>
+            <div className="cue-main">
+              <span className="cue-who">{speakerName(e.source)}</span>
+              <div className="cue-body">
+                {e.translation ? (
+                  <div className="cue-trans">{e.translation}</div>
+                ) : e.error ? (
+                  <div className="cue-err">{e.error}</div>
+                ) : e.note ? (
+                  <div className="cue-note">{e.note}</div>
+                ) : (
+                  <Typing />
+                )}
+                {showOriginal && e.original && <div className="cue-orig">{e.original}</div>}
+              </div>
+            </div>
+          </div>
+        ))}
+        {partialText && (
+          <div className={`cue ${partialSource} live`}>
+            <div className="cue-main">
+              <span className="cue-who">{speakerName(partialSource)}</span>
+              <div className="cue-body">
+                <div className="cue-trans interim">{partialText}</div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ---- Collapsed: reading-optimized. The TRANSLATION is the stable, bright hero;
+  // incoming speech is only a faint hint above it (it must never demote the line
+  // you're reading). ----
+  if (!everShownRef.current) {
     return (
       <div className="capstack empty">
         <span className="cap-empty">
@@ -1061,61 +1112,65 @@ function CaptionStack({
       </div>
     )
   }
-  const shown = expanded ? cues : cues.slice(-2)
-  const lastIdx = shown.length - 1
-  return (
-    <div
-      className={`capstack ${expanded ? 'expanded' : ''}`}
-      ref={feedRef}
-      onScroll={expanded ? onScroll : undefined}
-    >
-      {shown.map((c, i) => (
-        <CaptionCue
-          key={c.id}
-          cue={c}
-          live={i === lastIdx}
-          showOriginal={showOriginal}
-          showWho={expanded}
-        />
-      ))}
-    </div>
-  )
-}
 
-function CaptionCue({
-  cue,
-  live,
-  showOriginal,
-  showWho
-}: {
-  cue: Entry
-  live: boolean
-  showOriginal: boolean
-  showWho: boolean
-}) {
+  let hero: Entry | undefined
+  let incoming = ''
+
+  if (turbo) {
+    // Turbo's partial IS the live translation, so it's the hero. Between turns (partial
+    // cleared, entry arriving) hold the last translated line so it never blanks/flickers.
+    if (partialText) {
+      hero = { id: '__live', source: partialSource, original: '', translation: partialText }
+    } else {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (hasText(entries[i])) {
+          hero = entries[i]
+          break
+        }
+      }
+      if (!hero) hero = entries[entries.length - 1]
+    }
+  } else {
+    // Standard: hero = the most recent line that actually has a translation (held, so a
+    // just-finalized line that's still translating doesn't blank out what you're reading).
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (hasText(entries[i])) {
+        hero = entries[i]
+        break
+      }
+    }
+    const newest = entries[entries.length - 1]
+    if (!hero) hero = newest // nothing translated yet → show the newest (typing)
+    // Incoming = what's being spoken now (live partial), or the next utterance that
+    // finalized but isn't translated yet — shown faint, above the hero.
+    if (partialText) incoming = partialText
+    else if (newest && newest !== hero && !hasText(newest)) incoming = newest.original
+    // Very first utterance: no entries yet, only a live partial → show a "hearing you"
+    // hero (typing) so the reading area isn't just a tiny faint line.
+    if (!hero && partialText) {
+      hero = { id: '__pending', source: partialSource, original: '', translation: '' }
+    }
+  }
+
   return (
-    <div className={`cue ${cue.source} ${live ? 'live' : 'past'}`}>
-      <div className="cue-main">
-        {showWho && <span className="cue-who">{speakerName(cue.source)}</span>}
-        <div className="cue-body">
-          {cue.translation ? (
-            <div className="cue-trans">{cue.translation}</div>
-          ) : cue.error ? (
-            <div className="cue-err">{cue.error}</div>
-          ) : cue.note ? (
-            <div className="cue-note">{cue.note}</div>
-          ) : cue.partialText ? (
-            <div className="cue-trans interim">{cue.partialText}</div>
-          ) : (
-            <div className="typing">
-              <i />
-              <i />
-              <i />
-            </div>
-          )}
-          {showOriginal && cue.original && <div className="cue-orig">{cue.original}</div>}
+    <div className="capstack reading">
+      {incoming && <div className="cue-incoming">{incoming}</div>}
+      {hero && (
+        <div className={`cue hero ${hero.source}`}>
+          <div className="cue-body">
+            {hero.translation ? (
+              <div className="cue-trans">{hero.translation}</div>
+            ) : hero.error ? (
+              <div className="cue-err">{hero.error}</div>
+            ) : hero.note ? (
+              <div className="cue-note">{hero.note}</div>
+            ) : (
+              <Typing />
+            )}
+            {showOriginal && hero.original && <div className="cue-orig">{hero.original}</div>}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }

@@ -29,6 +29,7 @@ const api = {
       original: string
       sourceLang: string
       targetLang: string
+      translation?: string
     }) => void
   ) => subscribe('caption:final', cb),
   onTranslation: (
