@@ -57,6 +57,21 @@ const api = {
     cb: (p: { reached: boolean; warning?: boolean; spent: number; budget: number }) => void
   ) => subscribe('budget', cb),
 
+  askAssistant: (p: {
+    reqId: string
+    transcript: string
+    question: string
+    answerLang: string
+    otherLang: string
+  }) => ipcRenderer.send('assistant:ask', p),
+  cancelAssistant: (reqId: string) => ipcRenderer.send('assistant:cancel', { reqId }),
+  onAssistantDelta: (cb: (p: { reqId: string; text: string }) => void) =>
+    subscribe('assistant:delta', cb),
+  onAssistantDone: (cb: (p: { reqId: string; text: string; provider: string }) => void) =>
+    subscribe('assistant:done', cb),
+  onAssistantError: (cb: (p: { reqId: string; code: string; message: string }) => void) =>
+    subscribe('assistant:error', cb),
+
   windowControl: (action: 'minimize' | 'close' | 'pin' | 'unpin') =>
     ipcRenderer.send('window:control', action),
   setMode: (
@@ -68,6 +83,7 @@ const api = {
       | 'live-collapsed'
       | 'live-expanded'
       | 'mini'
+      | 'assistant'
   ) => ipcRenderer.send('window:setMode', mode),
   setDock: (dock: 'top-center' | 'bottom-center' | 'top-left' | 'top-right' | 'free') =>
     ipcRenderer.send('window:setDock', dock),

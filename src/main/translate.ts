@@ -6,7 +6,7 @@ interface ProviderConfig {
 }
 
 // All providers are OpenAI-compatible chat-completions endpoints.
-const PROVIDERS: Record<Provider, ProviderConfig> = {
+export const PROVIDERS: Record<Provider, ProviderConfig> = {
   deepseek: {
     url: 'https://api.deepseek.com/chat/completions',
     model: 'deepseek-chat'
@@ -21,7 +21,7 @@ const PROVIDERS: Record<Provider, ProviderConfig> = {
   }
 }
 
-const LANG_NAMES: Record<string, string> = {
+export const LANG_NAMES: Record<string, string> = {
   en: 'English',
   ko: 'Korean',
   zh: 'Chinese (Simplified)',
@@ -81,24 +81,29 @@ function buildRequest(opts: TranslateOptions): {
   return { url: cfg.url, headers, system, body }
 }
 
-function estimateTokens(s: string): number {
+export function estimateTokens(s: string): number {
   return Math.ceil(s.length / 3)
 }
 
-// Streaming translation: calls onDelta with the growing translation so the UI can
-// show words as they arrive (much lower perceived latency). Returns the final text + token usage.
-export async function translateStream(
-  opts: TranslateOptions,
+// Shared OpenAI-compatible SSE chat reader. Streams accumulated text via onDelta,
+// surfaces in-band {error} payloads (instead of swallowing them), and honors an
+// AbortSignal. Used by both translateStream and the meeting assistant.
+export async function streamChat(
+  url: string,
+  headers: Record<string, string>,
+  body: Record<string, unknown>,
+  signal: AbortSignal | undefined,
   onDelta: (accumulated: string) => void
-): Promise<TranslateResult> {
-  const { url, headers, system, body } = buildRequest(opts)
-  body.stream = true
-  body.stream_options = { include_usage: true }
-
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })
+): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...body, stream: true, stream_options: { include_usage: true } }),
+    signal
+  })
   if (!res.ok || !res.body) {
     const errBody = await res.text().catch(() => '')
-    throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 160)}`)
+    throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 200)}`)
   }
 
   const reader = res.body.getReader()
@@ -119,29 +124,43 @@ export async function translateStream(
       if (!trimmed.startsWith('data:')) continue
       const data = trimmed.slice(5).trim()
       if (data === '[DONE]' || data === '') continue
+      let json: {
+        choices?: { delta?: { content?: string } }[]
+        usage?: { prompt_tokens?: number; completion_tokens?: number }
+        error?: { message?: string }
+      }
       try {
-        const json = JSON.parse(data) as {
-          choices?: { delta?: { content?: string } }[]
-          usage?: { prompt_tokens?: number; completion_tokens?: number }
-        }
-        const delta = json.choices?.[0]?.delta?.content
-        if (delta) {
-          text += delta
-          onDelta(text.trim())
-        }
-        if (json.usage) {
-          inputTokens = json.usage.prompt_tokens ?? inputTokens
-          outputTokens = json.usage.completion_tokens ?? outputTokens
-        }
+        json = JSON.parse(data)
       } catch {
-        /* ignore partial/non-JSON keepalive lines */
+        continue // partial/non-JSON keepalive line
+      }
+      if (json.error) throw new Error(json.error.message ?? 'stream error')
+      const delta = json.choices?.[0]?.delta?.content
+      if (delta) {
+        text += delta
+        onDelta(text.trim())
+      }
+      if (json.usage) {
+        inputTokens = json.usage.prompt_tokens ?? inputTokens
+        outputTokens = json.usage.completion_tokens ?? outputTokens
       }
     }
   }
 
+  return { text: text.trim(), inputTokens, outputTokens }
+}
+
+// Streaming translation: calls onDelta with the growing translation so the UI can
+// show words as they arrive (much lower perceived latency). Returns the final text + token usage.
+export async function translateStream(
+  opts: TranslateOptions,
+  onDelta: (accumulated: string) => void
+): Promise<TranslateResult> {
+  const { url, headers, system, body } = buildRequest(opts)
+  const r = await streamChat(url, headers, body, undefined, onDelta)
   return {
-    text: text.trim(),
-    inputTokens: inputTokens || estimateTokens(opts.text + system),
-    outputTokens: outputTokens || estimateTokens(text)
+    text: r.text,
+    inputTokens: r.inputTokens || estimateTokens(opts.text + system),
+    outputTokens: r.outputTokens || estimateTokens(r.text)
   }
 }

@@ -34,6 +34,8 @@ export interface Settings {
   openaiApiKey: string // OpenAI key for the gpt-realtime-translate Turbo engine
   onboarded: boolean // has the user completed (or skipped) first-run setup
   fontScalePref: number // active font scale chosen via A-/A+ (overrides fontScale when set)
+  assistantAnswerLang: string // language the meeting assistant answers in ('' = use theirLanguage)
+  assistAutoSpeak: boolean // speak the assistant's answer aloud
   dock: Dock // overlay docking position on screen
   overlayBounds?: { x: number; y: number; width: number; height: number } // remembered free-drag position
   displayId?: number // display the overlay was last on (for multi-monitor restore)
@@ -67,6 +69,8 @@ const defaults: Settings = {
   openaiApiKey: '',
   onboarded: false,
   fontScalePref: 1,
+  assistantAnswerLang: '',
+  assistAutoSpeak: true,
   dock: 'top-center'
 }
 

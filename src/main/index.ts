@@ -16,6 +16,7 @@ import { GeminiLiveSession } from './geminiLive'
 import { OpenAIRealtimeSession } from './openaiRealtime'
 import { MacSystemTap, listRunningApps } from './systemAudioMac'
 import { translateStream } from './translate'
+import { askAssistantStream } from './assistant'
 import { elevenLabsTts } from './tts'
 import { getUsage, addStt, addTranslate, addTts, totalUsd } from './usage'
 
@@ -103,9 +104,11 @@ type WinMode =
   | 'live-collapsed'
   | 'live-expanded'
   | 'mini'
+  | 'assistant'
 const MODE_SIZE: Record<WinMode, { w: number; h: number }> = {
   firstrun: { w: 460, h: 320 },
   setup: { w: 460, h: 600 },
+  assistant: { w: 460, h: 600 },
   idle: { w: 500, h: 56 },
   'idle-menu': { w: 500, h: 248 }, // idle pill + an open popover (language / app)
   'live-collapsed': { w: 640, h: 184 }, // taller so the translation is comfortable to read
@@ -555,6 +558,8 @@ function stopAccrual(): void {
 }
 
 async function stopAll(): Promise<void> {
+  for (const ac of new Set(assistantAborts.values())) ac.abort()
+  assistantAborts.clear()
   macTap?.stop()
   macTap = null
   tapMuted = false
@@ -724,6 +729,68 @@ ipcMain.on('window:setCollapsedHeight', (_e, px: number) => {
 })
 ipcMain.on('window:setPin', (_e, on: boolean) => {
   if (win && !win.isDestroyed()) win.setAlwaysOnTop(on, 'floating')
+})
+
+// ---- Meeting assistant ----
+const assistantAborts = new Map<string, AbortController>()
+function httpCode(e: unknown): string {
+  const m = String((e as Error)?.message ?? e)
+  if (m === 'timeout') return 'timeout'
+  if (/^HTTP 401|^HTTP 403/.test(m) || /invalid.*key|unauthor/i.test(m)) return 'auth'
+  if (/^HTTP 402/.test(m) || /insufficient.?balance|balance/i.test(m)) return 'balance'
+  if (/^HTTP 429/.test(m) || /rate|quota/i.test(m)) return 'rate'
+  return 'network'
+}
+
+interface AskPayload {
+  reqId: string
+  transcript: string
+  question: string
+  answerLang: string
+  otherLang: string
+}
+ipcMain.on('assistant:ask', async (_e, p: AskPayload) => {
+  const s = activeSettings ?? (await loadSettings()) // works after Stop too
+  if (s.monthlyBudgetUSD > 0 && totalUsd(await getUsage()) >= s.monthlyBudgetUSD) {
+    return send('assistant:error', { reqId: p.reqId, code: 'budget', message: 'Budget reached' })
+  }
+  assistantAborts.get('current')?.abort() // single-flight: newest question wins
+  const ac = new AbortController()
+  assistantAborts.set('current', ac)
+  assistantAborts.set(p.reqId, ac)
+  dbg(`assistant:ask reqId=${p.reqId} chars=${p.transcript.length} q=${p.question.length}`)
+  try {
+    const r = await askAssistantStream(
+      {
+        settings: s,
+        transcript: p.transcript,
+        question: p.question,
+        answerLang: p.answerLang,
+        otherLang: p.otherLang,
+        signal: ac.signal
+      },
+      (text) => send('assistant:delta', { reqId: p.reqId, text })
+    )
+    const costUsd = (r.inputTokens / 1e6) * r.rate.in + (r.outputTokens / 1e6) * r.rate.out
+    await addTranslate(costUsd)
+    await emitUsage()
+    await checkBudget()
+    send('assistant:done', { reqId: p.reqId, text: r.text, provider: r.provider })
+  } catch (e) {
+    const er = e as Error & { cause?: { name?: string } }
+    if (er?.name === 'AbortError' || er?.cause?.name === 'AbortError') return // cancel — silent
+    const msg = String((e as Error)?.message ?? e)
+    const code = msg === 'NO_KEY' ? 'nokey' : msg === 'EMPTY' ? 'empty' : httpCode(e)
+    dbg(`assistant ERROR code=${code}`)
+    send('assistant:error', { reqId: p.reqId, code, message: msg.slice(0, 160) })
+  } finally {
+    if (assistantAborts.get('current') === ac) assistantAborts.delete('current')
+    assistantAborts.delete(p.reqId)
+  }
+})
+ipcMain.on('assistant:cancel', (_e, p: { reqId: string }) => {
+  assistantAborts.get(p.reqId)?.abort()
+  assistantAborts.delete(p.reqId)
 })
 
 ipcMain.on('app:relaunch', () => {

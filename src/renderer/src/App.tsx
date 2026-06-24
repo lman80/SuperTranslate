@@ -34,6 +34,8 @@ interface Settings {
   openaiApiKey: string
   onboarded: boolean
   fontScalePref: number
+  assistantAnswerLang: string
+  assistAutoSpeak: boolean
   dock: Dock
 }
 
@@ -81,6 +83,153 @@ const KEY_URL: Record<Provider, string> = {
 const FONT_STEPS = [0.9, 1.1, 1.35, 1.6]
 const speakerName = (s: Source): string => (s === 'mic' ? 'You' : 'Them')
 
+const LANG_NAME: Record<string, string> = {
+  en: 'English',
+  ko: 'Korean',
+  zh: 'Chinese',
+  auto: 'Chinese'
+}
+const ASK_WORD: Record<string, string> = { zh: '问助手', ko: '도우미', en: 'Ask' }
+interface Preset {
+  id: string
+  intent: string
+  label: Record<string, string>
+}
+const PRESETS: Preset[] = [
+  {
+    id: 'what',
+    intent: 'What is the OTHER speaker talking about right now? Explain simply.',
+    label: { zh: '他在说什么?', ko: '무슨 얘기예요?', en: 'What is he saying?' }
+  },
+  {
+    id: 'mean',
+    intent: 'What does the last thing the OTHER speaker said mean?',
+    label: { zh: '这是什么意思?', ko: '무슨 뜻이에요?', en: 'What does that mean?' }
+  },
+  {
+    id: 'want',
+    intent: 'What does the OTHER speaker want me to do or decide?',
+    label: { zh: '他想让我做什么?', ko: '저보고 뭘 하라는 거죠?', en: 'What does he want?' }
+  },
+  {
+    id: 'summary',
+    intent: 'Summarize the whole conversation so far in a few sentences.',
+    label: { zh: '总结一下到现在', ko: '지금까지 요약해줘', en: 'Summarize so far' }
+  },
+  {
+    id: 'question',
+    intent: 'Is the OTHER speaker asking me a question? If so, what is it and how might I answer?',
+    label: { zh: '他是在问我问题吗?', ko: '저한테 질문한 거예요?', en: 'Is he asking me?' }
+  },
+  {
+    id: 'example',
+    intent: 'Give a concrete example to clarify what the OTHER speaker means.',
+    label: { zh: '能举个例子吗?', ko: '예를 들어줄래요?', en: 'Give an example' }
+  }
+]
+const trL = (m: Record<string, string>, lang: string): string => m[lang] ?? m.en
+
+// Assistant UI chrome, localized to the answer language (ko falls back to en).
+const ASSIST_UI: Record<string, Record<string, string>> = {
+  zh: {
+    youAsked: '你问',
+    empty: '点一个问题，或在下面输入。我会根据刚才的对话用中文解释。',
+    thin: '还没有可解释的对话内容，等对方先说几句。',
+    speak: '朗读',
+    copy: '复制',
+    regen: '重新生成',
+    autoSpeak: '自动朗读',
+    send: '发送',
+    placeholder: '输入你的问题…',
+    setup: '设置',
+    poweredBy: '回答由',
+    micBlind: '要解释对方在说什么，需要先打开麦克风记录他的声音。',
+    waitSpeak: '等对方说几句话后再问。',
+    turnOnMic: '打开麦克风'
+  },
+  en: {
+    youAsked: 'You asked',
+    empty: 'Pick a question or type below. I’ll explain the conversation.',
+    thin: 'Nothing to explain yet — wait for a few sentences.',
+    speak: 'Speak',
+    copy: 'Copy',
+    regen: 'Regenerate',
+    autoSpeak: 'Auto-speak',
+    send: 'Send',
+    placeholder: 'Type your question…',
+    setup: 'Setup',
+    poweredBy: 'Answers by',
+    micBlind: 'To explain what the other person says, turn on the mic to capture their voice.',
+    waitSpeak: 'Wait for them to say a few sentences, then ask.',
+    turnOnMic: 'Turn on mic'
+  }
+}
+const ASSIST_ERR: Record<string, Record<string, string>> = {
+  zh: {
+    nokey: '请在设置中为助手添加一个翻译密钥。',
+    auth: '密钥无效，请在设置中检查。',
+    rate: '请求过于频繁或额度不足，请稍后再试。',
+    balance: '账户余额不足。',
+    timeout: '请求超时，请重试。',
+    network: '服务暂时不可用，请重试。',
+    empty: 'AI 未能生成回答，请换种问法重试。',
+    budget: '已达到本月预算上限。'
+  },
+  en: {
+    nokey: 'Add a translator API key in Setup to use Ask.',
+    auth: 'API key was rejected — check it in Setup.',
+    rate: 'Rate limit or quota hit — try again shortly.',
+    balance: 'Account balance is too low.',
+    timeout: 'The request timed out — try again.',
+    network: 'Service temporarily unavailable — try again.',
+    empty: 'No answer was generated — try rephrasing.',
+    budget: 'Monthly budget reached.'
+  }
+}
+
+// Build the transcript sent to the assistant. Role tags are language-neutral: OTHER = the
+// colleague being explained (mic / myLanguage); YOU = the helped person (system / theirLanguage).
+function buildAssistantTranscript(
+  entries: Entry[],
+  partial: { mic: string; system: string },
+  s: Settings,
+  maxChars = 12000
+): { transcript: string; userLineCount: number } {
+  const ln = (c: string): string => LANG_NAME[c] ?? c
+  const roleOther = `OTHER (${ln(s.myLanguage)})`
+  const roleYou = `YOU (${ln(s.theirLanguage)})`
+  const lines: string[] = []
+  let userLineCount = 0
+  let n = 0
+  for (const e of entries) {
+    const text = (e.original || e.translation || '').trim()
+    if (!text) continue
+    n++
+    const isOther = e.source === 'mic'
+    if (isOther) userLineCount++
+    let block = `[${n}] ${isOther ? roleOther : roleYou}: ${text}`
+    const gloss = (e.translation || '').trim()
+    if (gloss && gloss !== text) block += `\n    (translation: ${gloss})`
+    lines.push(block)
+  }
+  if (partial.mic?.trim()) {
+    lines.push(`[${++n}] ${roleOther}: ${partial.mic.trim()} [in progress]`)
+    userLineCount++
+  }
+  if (partial.system?.trim()) {
+    lines.push(`[${++n}] ${roleYou}: ${partial.system.trim()} [in progress]`)
+  }
+  let joined = lines.join('\n')
+  let truncated = false
+  while ([...joined].length > maxChars && lines.length > 1) {
+    lines.shift()
+    truncated = true
+    joined = lines.join('\n')
+  }
+  if (truncated) joined = '…(earlier conversation omitted)…\n' + joined
+  return { transcript: joined, userLineCount }
+}
+
 // Settings whose change requires re-initializing capture (NOT an app restart).
 const CAPTURE_KEYS = new Set<keyof Settings>([
   'myLanguage',
@@ -126,6 +275,15 @@ export default function App() {
   const [historyOpen, setHistoryOpen] = useState(false)
   const [popover, setPopover] = useState<Popover>(null)
   const [minimized, setMinimized] = useState(false)
+  const [assistantOpen, setAssistantOpen] = useState(false)
+  const [assistant, setAssistant] = useState<{
+    asking: boolean
+    question: string
+    answer: string
+    error: string
+    provider: string
+  }>({ asking: false, question: '', answer: '', error: '', provider: '' })
+  const assistantReqRef = useRef('')
 
   const settingsRef = useRef<Settings | null>(null)
   const runningRef = useRef(false)
@@ -159,6 +317,10 @@ export default function App() {
   useEffect(() => {
     setupOpenRef.current = setupOpen
   }, [setupOpen])
+  const minimizedRef = useRef(false)
+  useEffect(() => {
+    minimizedRef.current = minimized
+  }, [minimized])
   useEffect(() => {
     settingsRef.current = settings
     if (settings) {
@@ -216,24 +378,26 @@ export default function App() {
     ? 'firstrun'
     : setupOpen
       ? 'setup'
-      : minimized
-        ? 'mini'
-        : running
-          ? historyOpen
-            ? 'live-expanded'
-            : 'live-collapsed'
-          : popover
-            ? 'idle-menu'
-            : 'idle'
+      : assistantOpen
+        ? 'assistant'
+        : minimized
+          ? 'mini'
+          : running
+            ? historyOpen
+              ? 'live-expanded'
+              : 'live-collapsed'
+            : popover
+              ? 'idle-menu'
+              : 'idle'
   useEffect(() => {
     if (settingsRef.current) window.api.setMode(mode)
   }, [mode])
 
   // Drop always-on-top while setup/onboarding open so macOS prompts aren't hidden.
   useEffect(() => {
-    if (setupOpen || onboarding) window.api.setPin(false)
+    if (setupOpen || onboarding || assistantOpen) window.api.setPin(false)
     else window.api.setPin(pinned)
-  }, [setupOpen, onboarding, pinned])
+  }, [setupOpen, onboarding, assistantOpen, pinned])
 
   // ---- TTS voices ----
   useEffect(() => {
@@ -548,6 +712,52 @@ export default function App() {
     }
   }, [flash, speak, guardOn, guardOff, playTurboPcm, turboGuard, addBanner, playBgPcm])
 
+  // ---- meeting assistant stream (filtered by the active request id) ----
+  useEffect(() => {
+    const offDelta = window.api.onAssistantDelta(({ reqId, text }) => {
+      if (reqId === assistantReqRef.current) setAssistant((a) => ({ ...a, answer: text }))
+    })
+    const offDone = window.api.onAssistantDone(({ reqId, text, provider }) => {
+      if (reqId !== assistantReqRef.current) return
+      setAssistant((a) => ({ ...a, asking: false, answer: text, provider }))
+      const s = settingsRef.current
+      if (s?.assistAutoSpeak && text) {
+        const want = s.assistantAnswerLang || s.theirLanguage
+        speak(text, want === 'auto' ? 'zh' : want)
+      }
+    })
+    const offErr = window.api.onAssistantError(({ reqId, code, message }) => {
+      if (reqId === assistantReqRef.current)
+        setAssistant((a) => ({ ...a, asking: false, error: code || message || 'error' }))
+    })
+    return () => {
+      offDelta()
+      offDone()
+      offErr()
+    }
+  }, [speak])
+
+  // Cmd/Ctrl+K opens the assistant while a Standard meeting is running.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        if (
+          runningRef.current &&
+          !settingsRef.current?.turboMode &&
+          !setupOpen &&
+          !minimizedRef.current
+        ) {
+          e.preventDefault()
+          assistantReqRef.current = ''
+          setAssistant({ asking: false, question: '', answer: '', error: '', provider: '' })
+          setAssistantOpen(true)
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [setupOpen])
+
   // Auto-scroll the expanded transcript only when pinned to bottom.
   useEffect(() => {
     const el = feedRef.current
@@ -658,6 +868,7 @@ export default function App() {
       flash('Pick the app to listen to.')
       return
     }
+    setEntries([]) // a fresh Start is a new meeting (resets the assistant transcript)
     await doStart()
   }, [doStart, flash])
 
@@ -742,6 +953,38 @@ export default function App() {
     void applyLive({ turboMode: target })
   }, [applyLive, flash])
 
+  // `display` is echoed to the user (e.g. localized preset label); `question` is the model intent.
+  const askAssistant = (question: string, display?: string): void => {
+    const s = settingsRef.current
+    if (!s) return
+    // eslint-disable-next-line no-control-regex
+    const q = question
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 2000)
+    if (!q) return
+    const { transcript } = buildAssistantTranscript(entries, partial, s)
+    if (!transcript.trim()) return // nothing to explain yet
+    const want = s.assistantAnswerLang || s.theirLanguage
+    const answerLang = want === 'auto' ? 'zh' : want
+    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    assistantReqRef.current = reqId
+    setAssistant({ asking: true, question: display ?? q, answer: '', error: '', provider: '' })
+    window.api.askAssistant({ reqId, transcript, question: q, answerLang, otherLang: s.myLanguage })
+  }
+  const openAssistant = (): void => {
+    assistantReqRef.current = ''
+    setAssistant({ asking: false, question: '', answer: '', error: '', provider: '' })
+    setAssistantOpen(true)
+  }
+  const closeAssistant = (): void => {
+    if (assistantReqRef.current) window.api.cancelAssistant(assistantReqRef.current)
+    assistantReqRef.current = '' // drop any late delta/done (prevents stray auto-speak)
+    setAssistant({ asking: false, question: '', answer: '', error: '', provider: '' })
+    setAssistantOpen(false)
+  }
+
   if (!settings) return <div className="boot">Loading…</div>
 
   const fontScale = settings.fontScalePref || settings.fontScale || 1
@@ -775,6 +1018,33 @@ export default function App() {
           togglePin={togglePin}
           onClose={closeSetup}
         />
+      ) : assistantOpen ? (
+        <AssistantSheet
+          settings={settings}
+          state={assistant}
+          hasTranscript={entries.length > 0 || !!(partial.system || partial.mic)}
+          micState={
+            !(entries.every((e) => e.source !== 'mic') && !partial.mic)
+              ? 'ok'
+              : settings.captureMic
+                ? 'silent'
+                : 'off'
+          }
+          onAsk={askAssistant}
+          onSetAnswerLang={(l) => applyLive({ assistantAnswerLang: l })}
+          onToggleAutoSpeak={() => applyLive({ assistAutoSpeak: !settings.assistAutoSpeak })}
+          onSpeak={(t, l) => speak(t, l)}
+          onCopy={(t) => {
+            void navigator.clipboard?.writeText(t).catch(() => undefined)
+            flash('Copied ✓')
+          }}
+          onTurnOnMic={() => applyLive({ captureMic: true })}
+          onOpenSetup={() => {
+            setAssistantOpen(false)
+            setSetupOpen(true)
+          }}
+          onClose={closeAssistant}
+        />
       ) : minimized ? (
         <MiniHandle
           live={running}
@@ -798,6 +1068,7 @@ export default function App() {
               onFont={cycleFont}
               onPopover={(p) => setPopover((cur) => (cur === p ? null : p))}
               onToggleEngine={toggleEngine}
+              onAsk={openAssistant}
               onToggleHistory={() => setHistoryOpen((v) => !v)}
               onSetup={() => setSetupOpen(true)}
               onMinimize={() => setMinimized(true)}
@@ -1044,6 +1315,7 @@ function LiveControlRow({
   onFont,
   onPopover,
   onToggleEngine,
+  onAsk,
   onToggleHistory,
   onSetup,
   onMinimize,
@@ -1062,6 +1334,7 @@ function LiveControlRow({
   onFont: () => void
   onPopover: (p: Popover) => void
   onToggleEngine: () => void
+  onAsk: () => void
   onToggleHistory: () => void
   onSetup: () => void
   onMinimize: () => void
@@ -1113,6 +1386,15 @@ function LiveControlRow({
           ⤢
         </button>
       </div>
+      {!settings.turboMode && (
+        <button
+          className="mini ask"
+          onClick={onAsk}
+          title="Ask the assistant about the conversation"
+        >
+          💬 {ASK_WORD[settings.theirLanguage] ?? 'Ask'}
+        </button>
+      )}
       <button
         className={`iconbtn ${historyOpen ? 'on' : ''}`}
         title={historyOpen ? 'Collapse' : 'History'}
@@ -1454,6 +1736,195 @@ function DockPopover({
       </div>
       <div className="pop-foot">Or just drag the bar anywhere.</div>
     </>
+  )
+}
+
+/* ============================ Meeting assistant sheet ============================ */
+function AssistantSheet({
+  settings,
+  state,
+  hasTranscript,
+  micState,
+  onAsk,
+  onSetAnswerLang,
+  onToggleAutoSpeak,
+  onSpeak,
+  onCopy,
+  onTurnOnMic,
+  onOpenSetup,
+  onClose
+}: {
+  settings: Settings
+  state: { asking: boolean; question: string; answer: string; error: string; provider: string }
+  hasTranscript: boolean
+  micState: 'ok' | 'silent' | 'off'
+  onAsk: (q: string, display?: string) => void
+  onSetAnswerLang: (l: string) => void
+  onToggleAutoSpeak: () => void
+  onSpeak: (t: string, l: string) => void
+  onCopy: (t: string) => void
+  onTurnOnMic: () => void
+  onOpenSetup: () => void
+  onClose: () => void
+}) {
+  const [input, setInput] = useState('')
+  const composingRef = useRef(false)
+  const answerRef = useRef<HTMLDivElement | null>(null)
+  const want = settings.assistantAnswerLang || settings.theirLanguage
+  const lang = want === 'auto' ? 'zh' : want
+  const ui = ASSIST_UI[lang] ?? ASSIST_UI.en
+  const errText = state.error ? (ASSIST_ERR[lang]?.[state.error] ?? ASSIST_ERR.en[state.error] ?? ASSIST_ERR.en.network) : ''
+  // Show the data-egress provider up front (derived from settings), not only after an answer.
+  const providerLabel =
+    state.provider ||
+    (settings.translateApiKey
+      ? PROVIDER_LABEL[settings.translateProvider]
+      : settings.openaiApiKey
+        ? 'OpenAI'
+        : '')
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  useEffect(() => {
+    const el = answerRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [state.answer])
+
+  const submitInput = (): void => {
+    if (input.trim() && !state.asking && hasTranscript) {
+      onAsk(input)
+      setInput('')
+    }
+  }
+
+  return (
+    <div className="assist">
+      <div className="assist-head">
+        <h2>💬 {ASK_WORD[lang] ?? 'Ask'}</h2>
+        <div className="seg sm assist-lang">
+          <button
+            className={want !== settings.myLanguage ? 'on' : ''}
+            onClick={() => onSetAnswerLang(settings.theirLanguage)}
+          >
+            {LANG_NAME[settings.theirLanguage] ?? '中文'}
+          </button>
+          <button
+            className={want === settings.myLanguage ? 'on' : ''}
+            onClick={() => onSetAnswerLang(settings.myLanguage)}
+          >
+            {LANG_NAME[settings.myLanguage] ?? 'EN'}
+          </button>
+        </div>
+        <button className="iconbtn" onClick={onClose} title="Close">
+          ✕
+        </button>
+      </div>
+      <div className="assist-body">
+        <div className="assist-presets">
+          {PRESETS.map((p) => (
+            <button
+              key={p.id}
+              className="preset"
+              disabled={state.asking || !hasTranscript}
+              onClick={() => onAsk(p.intent, trL(p.label, lang))}
+            >
+              {trL(p.label, lang)}
+            </button>
+          ))}
+        </div>
+        {micState === 'off' && (
+          <div className="notice warn assist-notice">
+            <span className="n-text">{ui.micBlind}</span>
+            <button className="n-btn" onClick={onTurnOnMic}>
+              {ui.turnOnMic}
+            </button>
+          </div>
+        )}
+        {micState === 'silent' && hasTranscript && (
+          <div className="assist-q">{ui.waitSpeak}</div>
+        )}
+        {state.question && (
+          <div className="assist-q">
+            {ui.youAsked}: {state.question}
+          </div>
+        )}
+        <div className="assist-answer" ref={answerRef}>
+          {state.error ? (
+            <div className="assist-err">
+              {errText}
+              {(state.error === 'nokey' || state.error === 'auth') && (
+                <button className="link" onClick={onOpenSetup}>
+                  → {ui.setup}
+                </button>
+              )}
+            </div>
+          ) : state.answer ? (
+            state.answer
+          ) : state.asking ? (
+            <Typing />
+          ) : (
+            <span className="assist-hint">{hasTranscript ? ui.empty : ui.thin}</span>
+          )}
+        </div>
+        {state.answer && !state.asking && (
+          <div className="assist-actions">
+            <button className="mini" onClick={() => onSpeak(state.answer, lang)}>
+              🔊 {ui.speak}
+            </button>
+            <button className="mini" onClick={() => onCopy(state.answer)}>
+              ⧉ {ui.copy}
+            </button>
+            {state.question && (
+              <button className="mini" onClick={() => onAsk(state.question)}>
+                ↻ {ui.regen}
+              </button>
+            )}
+            <label className="assist-autospeak">
+              <input type="checkbox" checked={settings.assistAutoSpeak} onChange={onToggleAutoSpeak} />
+              {ui.autoSpeak}
+            </label>
+          </div>
+        )}
+      </div>
+      <div className="assist-input">
+        <textarea
+          value={input}
+          placeholder={ui.placeholder}
+          rows={1}
+          onChange={(e) => setInput(e.target.value)}
+          onCompositionStart={() => (composingRef.current = true)}
+          onCompositionEnd={() => (composingRef.current = false)}
+          onKeyDown={(e) => {
+            if (
+              e.key === 'Enter' &&
+              !e.shiftKey &&
+              !composingRef.current &&
+              !e.nativeEvent.isComposing
+            ) {
+              e.preventDefault()
+              submitInput()
+            }
+          }}
+        />
+        <button
+          className="mini primary"
+          onClick={submitInput}
+          disabled={state.asking || !input.trim() || !hasTranscript}
+        >
+          {ui.send}
+        </button>
+      </div>
+      {providerLabel && (
+        <div className="assist-foot">
+          {ui.poweredBy} {providerLabel}
+        </div>
+      )}
+    </div>
   )
 }
 
