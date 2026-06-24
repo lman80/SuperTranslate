@@ -27,6 +27,10 @@ mac:
 win:
   target: nsis
   artifactName: ${productName}-${version}-setup.${ext}
+  # The macOS-only native modules are never used on Windows — keep them out of the package.
+  files:
+    - '!**/node_modules/audiotee/**'
+    - '!**/node_modules/screencapturekit-audio-capture/**'
 nsis:
   oneClick: false
   perMachine: false

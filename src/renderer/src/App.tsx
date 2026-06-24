@@ -82,6 +82,9 @@ const KEY_URL: Record<Provider, string> = {
 }
 const FONT_STEPS = [0.9, 1.1, 1.35, 1.6]
 const speakerName = (s: Source): string => (s === 'mic' ? 'You' : 'Them')
+// On Windows we capture whole-system audio (no per-app pick/mute/duck), so several
+// macOS-only affordances are hidden.
+const IS_MAC = window.api.platform === 'darwin'
 
 const LANG_NAME: Record<string, string> = {
   en: 'English',
@@ -445,11 +448,16 @@ export default function App() {
   const turboGuard = useCallback(
     (msUntilDone: number) => {
       setMicMuted(true)
+      // On Windows the renderer captures whole-system audio, so our own Turbo voice would
+      // be re-heard — mute system capture during playback too. (On mac the native tap
+      // captures only the other app, so we keep system input live for continuous Turbo.)
+      if (!IS_MAC) setSystemMuted(true)
       bgDuckedRef.current = true
       applyBgGain()
       if (turboGuardTimer.current) clearTimeout(turboGuardTimer.current)
       turboGuardTimer.current = setTimeout(() => {
         setMicMuted(false)
+        if (!IS_MAC) setSystemMuted(false)
         bgDuckedRef.current = false
         applyBgGain()
       }, msUntilDone + 400)
@@ -652,7 +660,7 @@ export default function App() {
         addBanner('err-perm', {
           kind: 'warn',
           text: message,
-          action: { label: 'Fix', fn: () => window.api.openScreenSettings() },
+          action: IS_MAC ? { label: 'Fix', fn: () => window.api.openScreenSettings() } : undefined,
           dismissable: true
         })
       } else if (m.includes('voice') || m.includes('elevenlabs')) {
@@ -863,7 +871,7 @@ export default function App() {
       flash('Add your key in Setup to start.')
       return
     }
-    if (!s.captureAppPid) {
+    if (IS_MAC && !s.captureAppPid) {
       setPopover('app')
       flash('Pick the app to listen to.')
       return
@@ -1101,7 +1109,7 @@ export default function App() {
               showOriginal={settings.showOriginal}
               feedRef={feedRef}
               onScroll={onFeedScroll}
-              appName={settings.captureAppName}
+              appName={IS_MAC ? settings.captureAppName : 'all system audio'}
             />
           )}
 
@@ -1240,8 +1248,12 @@ function IdleRow({
     <div className="row idle-row">
       <span className={`dot ${ready ? '' : 'amber'}`} />
       <EngineChip turbo={settings.turboMode} onToggle={onToggleEngine} />
-      <span className="row-text" title={settings.captureAppName || undefined}>
-        {settings.captureAppName ? settings.captureAppName : ready ? 'Ready' : 'Add your key'}
+      <span className="row-text" title={(IS_MAC && settings.captureAppName) || undefined}>
+        {IS_MAC && settings.captureAppName
+          ? settings.captureAppName
+          : ready
+            ? 'Ready'
+            : 'Add your key'}
       </span>
       <button className="badge lang" onClick={() => onPopover('lang')} title="Languages">
         {dir} ▾
@@ -1379,9 +1391,11 @@ function LiveControlRow({
         <button className="iconbtn" title="Text size" onClick={onFont}>
           A
         </button>
-        <button className="iconbtn" title="Source app" onClick={() => onPopover('app')}>
-          🖥
-        </button>
+        {IS_MAC && (
+          <button className="iconbtn" title="Source app" onClick={() => onPopover('app')}>
+            🖥
+          </button>
+        )}
         <button className="iconbtn" title="Position" onClick={() => onPopover('dock')}>
           ⤢
         </button>
@@ -1937,7 +1951,7 @@ function FirstRun({ onOpenSetup, onSkip }: { onOpenSetup: () => void; onSkip: ()
       <p className="fr-sub">Live translation that floats over your call.</p>
       <ol className="fr-steps">
         <li>Add your API key</li>
-        <li>Pick the call app</li>
+        <li>{IS_MAC ? 'Pick the call app' : 'Play your call audio'}</li>
         <li>Press Start</li>
       </ol>
       <div className="fr-actions">
@@ -2182,23 +2196,33 @@ function SetupSheet({
             value={settings.voiceVolume}
             onChange={(e) => applyLive({ voiceVolume: Number(e.target.value) })}
           />
-          <label className="slabel">
-            Background (the call, under the translation) {Math.round(settings.backgroundVolume * 100)}
-            %
-          </label>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={settings.backgroundVolume}
-            onChange={(e) => applyLive({ backgroundVolume: Number(e.target.value) })}
-          />
-          <p className="hint">
-            For native apps (Zoom/Teams) we mute the app and replay it at this volume under the
-            translation — turn it down and push Voice up to hear mostly the translation. It ducks
-            automatically while the translation speaks. (Browsers: lower the browser’s own volume.)
-          </p>
+          {IS_MAC ? (
+            <>
+              <label className="slabel">
+                Background (the call, under the translation){' '}
+                {Math.round(settings.backgroundVolume * 100)}%
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={settings.backgroundVolume}
+                onChange={(e) => applyLive({ backgroundVolume: Number(e.target.value) })}
+              />
+              <p className="hint">
+                For native apps (Zoom/Teams) we mute the app and replay it at this volume under the
+                translation — turn it down and push Voice up to hear mostly the translation. It ducks
+                automatically while the translation speaks. (Browsers: lower the browser’s own
+                volume.)
+              </p>
+            </>
+          ) : (
+            <p className="hint">
+              On Windows, SuperTranslate captures all system audio. Keep only the call app playing
+              and lower other apps; use headphones to avoid the translation echoing back.
+            </p>
+          )}
         </Section>
 
         <Section title="Audio & display">
@@ -2215,30 +2239,32 @@ function SetupSheet({
           <Toggle checked={pinned} onChange={togglePin} label="Keep window on top" />
         </Section>
 
-        <Section title="Permissions">
-          <PermissionRow
-            icon="🖥️"
-            title="Screen & System Audio"
-            sub="Lets SuperTranslate hear the other app."
-            status={perms.screen}
-            onGrant={() => window.api.openScreenSettings()}
-            onRefresh={refreshPerms}
-            needsRelaunch
-          />
-          {settings.captureMic && (
+        {IS_MAC && (
+          <Section title="Permissions">
             <PermissionRow
-              icon="🎙️"
-              title="Microphone"
-              sub="Needed because ‘translate me’ is on."
-              status={perms.microphone}
-              onGrant={async () => {
-                await window.api.askMicPermission()
-                refreshPerms()
-              }}
+              icon="🖥️"
+              title="Screen & System Audio"
+              sub="Lets SuperTranslate hear the other app."
+              status={perms.screen}
+              onGrant={() => window.api.openScreenSettings()}
               onRefresh={refreshPerms}
+              needsRelaunch
             />
-          )}
-        </Section>
+            {settings.captureMic && (
+              <PermissionRow
+                icon="🎙️"
+                title="Microphone"
+                sub="Needed because ‘translate me’ is on."
+                status={perms.microphone}
+                onGrant={async () => {
+                  await window.api.askMicPermission()
+                  refreshPerms()
+                }}
+                onRefresh={refreshPerms}
+              />
+            )}
+          </Section>
+        )}
 
         <Section title="Budget">
           <div className="brow">

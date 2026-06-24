@@ -6,28 +6,36 @@
 //    bundle (so browser tabs work) but can't mute the source (slight overlap).
 import { app } from 'electron'
 import { join } from 'path'
-import { AudioCapture } from 'screencapturekit-audio-capture'
+// Type-only import (erased at compile) — the native module is loaded LAZILY below so
+// merely importing this file never pulls the macOS-only addon in (would crash on Windows).
+import type { AudioCapture as AudioCaptureType } from 'screencapturekit-audio-capture'
+
+type AudioCaptureCtor = typeof import('screencapturekit-audio-capture').AudioCapture
+let AudioCaptureCtorCache: AudioCaptureCtor | null = null
+async function loadAudioCapture(): Promise<AudioCaptureCtor> {
+  if (!AudioCaptureCtorCache) {
+    AudioCaptureCtorCache = (await import('screencapturekit-audio-capture')).AudioCapture
+  }
+  return AudioCaptureCtorCache
+}
 
 export interface RunningApp {
   pid: number
   name: string
 }
 
-let lister: AudioCapture | null = null
-export function listRunningApps(): Promise<RunningApp[]> {
-  return new Promise((resolve) => {
-    try {
-      if (!lister) lister = new AudioCapture()
-      const apps = lister.getAudioApps() as { processId: number; applicationName: string }[]
-      resolve(
-        apps
-          .map((a) => ({ pid: a.processId, name: a.applicationName }))
-          .filter((a) => a.pid > 0 && a.name)
-      )
-    } catch {
-      resolve([])
-    }
-  })
+let lister: AudioCaptureType | null = null
+export async function listRunningApps(): Promise<RunningApp[]> {
+  try {
+    const AudioCapture = await loadAudioCapture()
+    if (!lister) lister = new AudioCapture()
+    const apps = lister.getAudioApps() as { processId: number; applicationName: string }[]
+    return apps
+      .map((a) => ({ pid: a.processId, name: a.applicationName }))
+      .filter((a) => a.pid > 0 && a.name)
+  } catch {
+    return []
+  }
 }
 
 let AudioTeeCtor: (new (o: unknown) => AudioTeeInstance) | null = null
@@ -72,7 +80,7 @@ export interface TapCallbacks {
 
 export class MacSystemTap {
   private tee: AudioTeeInstance | null = null
-  private cap: AudioCapture | null = null
+  private cap: AudioCaptureType | null = null
   private stopped = false
   private gotData = false
 
@@ -97,7 +105,7 @@ export class MacSystemTap {
     )
     this.cb.onLog?.(`start: pid=${this.includePid} app="${this.appName}" browser=${isBrowser}`)
     if (isBrowser) {
-      this.startScreenCaptureKit()
+      void this.startScreenCaptureKit()
       return
     }
     this.cb.onLog?.(`trying CoreAudio mute-tap for pid ${this.includePid}`)
@@ -136,17 +144,24 @@ export class MacSystemTap {
           /* ignore */
         }
         this.tee = null
-        this.startScreenCaptureKit()
+        void this.startScreenCaptureKit()
       })
       await tee.start()
     } catch {
-      this.startScreenCaptureKit()
+      void this.startScreenCaptureKit()
     }
   }
 
-  private startScreenCaptureKit(): void {
+  private async startScreenCaptureKit(): Promise<void> {
     if (this.stopped) return
     this.cb.onLog?.(`ScreenCaptureKit startCapture pid ${this.includePid}`)
+    let AudioCapture: AudioCaptureCtor
+    try {
+      AudioCapture = await loadAudioCapture()
+    } catch (e) {
+      this.cb.onError(`Couldn’t load audio capture: ${(e as Error).message}`)
+      return
+    }
     try {
       const cap = new AudioCapture()
       this.cap = cap

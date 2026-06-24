@@ -10,6 +10,7 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): Unsubscribe {
 }
 
 const api = {
+  platform: process.platform, // 'darwin' | 'win32' | 'linux' — lets the UI adapt per-OS
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (patch: unknown) => ipcRenderer.invoke('settings:save', patch),
   getUsage: () => ipcRenderer.invoke('usage:get'),

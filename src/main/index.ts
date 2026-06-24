@@ -14,7 +14,9 @@ import { loadSettings, saveSettings, type Settings, type Provider, type Dock } f
 import { SonioxSession } from './soniox'
 import { GeminiLiveSession } from './geminiLive'
 import { OpenAIRealtimeSession } from './openaiRealtime'
-import { MacSystemTap, listRunningApps } from './systemAudioMac'
+// macOS-only native audio module — imported DYNAMICALLY (and only on darwin) so the app
+// can launch on Windows, where this addon doesn't exist. Type-only import here is erased.
+import type { MacSystemTap as MacSystemTapType } from './systemAudioMac'
 import { translateStream } from './translate'
 import { askAssistantStream } from './assistant'
 import { elevenLabsTts } from './tts'
@@ -43,6 +45,11 @@ const TRANSLATE_RATES: Record<Provider, { in: number; out: number }> = {
   openrouter: { in: 0.5, out: 1.5 }
 }
 
+// macOS 'floating' sits below system dialogs (intended); on Windows it sits below the
+// taskbar/fullscreen apps, so use 'screen-saver' there to keep the overlay on top.
+const TOP_LEVEL: 'floating' | 'screen-saver' = process.platform === 'darwin' ? 'floating' : 'screen-saver'
+const IS_MAC = process.platform === 'darwin'
+
 let win: BrowserWindow | null = null
 const sessions: Record<Source, SonioxSession | GeminiLiveSession | OpenAIRealtimeSession | null> = {
   mic: null,
@@ -50,7 +57,7 @@ const sessions: Record<Source, SonioxSession | GeminiLiveSession | OpenAIRealtim
 }
 let systemKind: 'soniox' | 'gemini' | 'openai' = 'soniox'
 let turboFinalizeTimer: ReturnType<typeof setTimeout> | null = null
-let macTap: MacSystemTap | null = null
+let macTap: MacSystemTapType | null = null
 let tapMuted = false // the captured app's own output is silenced (so we can replay it quietly)
 let lastLevelSent = 0
 let running = false
@@ -235,8 +242,8 @@ function createWindow(boot: { mode: WinMode; dock: Dock }): void {
 
   // 'floating' keeps us above normal app windows but BELOW macOS system dialogs/
   // permission prompts (so they're not hidden underneath us). 'screen-saver' covered them.
-  win.setAlwaysOnTop(true, 'floating')
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  win.setAlwaysOnTop(true, TOP_LEVEL)
+  if (IS_MAC) win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   win.once('ready-to-show', () => win?.show())
 
   // Persist a user drag as a 'free' position (CSS app-region drag doesn't report
@@ -620,6 +627,7 @@ ipcMain.handle('capture:start', async () => {
   // app means our own output is never in the stream → no feedback loop. The renderer
   // does NOT capture system audio on macOS.
   if (process.platform === 'darwin' && s.captureSystemAudio) {
+    const { MacSystemTap } = await import('./systemAudioMac')
     macTap = new MacSystemTap(s.captureAppPid || undefined, s.captureAppName, {
       onData: (pcm) => {
         if (!running) return
@@ -658,14 +666,28 @@ function emitSystemLevel(rms: number): void {
   send('system:level', { rms })
 }
 
-ipcMain.handle('apps:list', () => listRunningApps())
+ipcMain.handle('apps:list', async () => {
+  if (process.platform !== 'darwin') return [] // no per-app picker on Windows (whole-system capture)
+  const { listRunningApps } = await import('./systemAudioMac')
+  return listRunningApps()
+})
 
 ipcMain.on('open-screen-settings', () => {
-  shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+  // Windows has no screen/system-audio privacy pane for loopback; the renderer hides
+  // this affordance there, so this only fires on macOS.
+  if (IS_MAC) {
+    shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+    )
+  }
 })
 
 ipcMain.on('open-mic-settings', () => {
-  shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone')
+  shell.openExternal(
+    IS_MAC
+      ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
+      : 'ms-settings:privacy-microphone'
+  )
 })
 
 ipcMain.handle('permissions:get', () => {
@@ -712,7 +734,7 @@ ipcMain.on('window:control', (_e, action: 'minimize' | 'close' | 'pin' | 'unpin'
   }
   if (!win) return
   if (action === 'minimize') win.minimize()
-  else if (action === 'pin') win.setAlwaysOnTop(true, 'floating')
+  else if (action === 'pin') win.setAlwaysOnTop(true, TOP_LEVEL)
   else if (action === 'unpin') win.setAlwaysOnTop(false)
 })
 
@@ -728,7 +750,7 @@ ipcMain.on('window:setCollapsedHeight', (_e, px: number) => {
   if (currentMode === 'live-collapsed') applyMode('live-collapsed')
 })
 ipcMain.on('window:setPin', (_e, on: boolean) => {
-  if (win && !win.isDestroyed()) win.setAlwaysOnTop(on, 'floating')
+  if (win && !win.isDestroyed()) win.setAlwaysOnTop(on, TOP_LEVEL)
 })
 
 // ---- Meeting assistant ----
@@ -817,7 +839,14 @@ app.whenReady().then(async () => {
           callback({}) // permission not granted yet → deny cleanly
           return
         }
-        callback({ video: sources[0], audio: 'loopback' })
+        // Windows captures the whole-system mix here. 'loopbackWithMute' silences the
+        // local speakers while capturing so our own translation isn't re-heard. If QA
+        // finds it also mutes our TTS/Turbo, set WIN_LOOPBACK_MUTE=false (renderer
+        // mute-guards then cover feedback). macOS uses the native tap, not this path.
+        const WIN_LOOPBACK_MUTE = true
+        const audio =
+          process.platform === 'win32' && WIN_LOOPBACK_MUTE ? 'loopbackWithMute' : 'loopback'
+        callback({ video: sources[0], audio })
       } catch {
         callback({})
       }

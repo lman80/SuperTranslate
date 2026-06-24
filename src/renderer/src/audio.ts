@@ -1,5 +1,10 @@
 import workletSource from './pcm-worklet.js?raw'
 
+const IS_MAC = window.api.platform === 'darwin'
+const SYS_DENIED = IS_MAC
+  ? 'System audio permission was denied. Enable SuperTranslate under System Settings → Privacy & Security → Screen & System Audio Recording, then quit and reopen the app.'
+  : 'No system audio is being captured. Make sure the call is playing, your output isn’t muted, and use headphones so the translation doesn’t echo back.'
+
 // Load the worklet from its raw source via a Blob URL. This avoids bundler
 // inlining/transform issues and works identically in dev and packaged builds.
 let workletBlobUrl: string | null = null
@@ -120,9 +125,7 @@ export async function startCapture(opts: CaptureOptions): Promise<CaptureResult>
       })
       const track = display.getAudioTracks()[0]
       if (!track || track.readyState !== 'live') {
-        opts.onWarning(
-          'System audio needs permission. Open System Settings → Privacy & Security → Screen & System Audio Recording, turn on SuperTranslate, then quit and reopen the app.'
-        )
+        opts.onWarning(SYS_DENIED)
       } else {
         streams.push(display)
         await pipeStreamToPcm('system', display, contexts)
@@ -150,9 +153,7 @@ export async function startCapture(opts: CaptureOptions): Promise<CaptureResult>
     } catch (e) {
       const err = e as Error
       opts.onWarning(
-        err.name === 'NotAllowedError'
-          ? 'System audio permission was denied. Enable SuperTranslate under System Settings → Privacy & Security → Screen & System Audio Recording, then quit and reopen the app.'
-          : `Could not capture system audio: ${err.message}`
+        err.name === 'NotAllowedError' ? SYS_DENIED : `Could not capture system audio: ${err.message}`
       )
     }
   }
