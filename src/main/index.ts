@@ -10,6 +10,7 @@ import {
 } from 'electron'
 import { join } from 'path'
 import { appendFileSync, writeFileSync } from 'fs'
+import { execFile } from 'child_process'
 import { loadSettings, saveSettings, type Settings, type Provider, type Dock } from './settings'
 import { SonioxSession } from './soniox'
 import { GeminiLiveSession } from './geminiLive'
@@ -59,6 +60,7 @@ let systemKind: 'soniox' | 'gemini' | 'openai' = 'soniox'
 let turboFinalizeTimer: ReturnType<typeof setTimeout> | null = null
 let macTap: MacSystemTapType | null = null
 let tapMuted = false // the captured app's own output is silenced (so we can replay it quietly)
+let screenPermSaved = false // per-launch guard for persisting screenPermVerified
 let lastLevelSent = 0
 let running = false
 let activeSettings: Settings | null = null
@@ -118,8 +120,8 @@ const MODE_SIZE: Record<WinMode, { w: number; h: number }> = {
   assistant: { w: 460, h: 600 },
   idle: { w: 500, h: 56 },
   'idle-menu': { w: 500, h: 248 }, // idle pill + an open popover (language / app)
-  'live-collapsed': { w: 640, h: 184 }, // taller so the translation is comfortable to read
-  'live-expanded': { w: 640, h: 400 },
+  'live-collapsed': { w: 660, h: 184 }, // taller so the translation is comfortable to read
+  'live-expanded': { w: 660, h: 400 },
   mini: { w: 52, h: 52 } // collapsed-to-handle: stays on top but out of the way
 }
 const BAR_MODES = new Set<WinMode>([
@@ -480,19 +482,21 @@ function startSession(source: Source, s: Settings): void {
           await checkBudget()
 
           // Premium voice: generate ElevenLabs audio for the other person's line.
+          // Read the LIVE settings so the bar's speak toggle applies immediately.
+          const live = activeSettings ?? s
           if (
-            s.speakAloud &&
+            live.speakAloud &&
             source === 'system' &&
-            s.ttsEngine === 'elevenlabs' &&
-            s.elevenLabsApiKey &&
+            live.ttsEngine === 'elevenlabs' &&
+            live.elevenLabsApiKey &&
             result.text
           ) {
             try {
               const audio = await elevenLabsTts({
-                apiKey: s.elevenLabsApiKey,
-                voiceId: s.elevenLabsVoiceId,
+                apiKey: live.elevenLabsApiKey,
+                voiceId: live.elevenLabsVoiceId,
                 text: result.text,
-                speed: s.ttsRate
+                speed: live.ttsRate
               })
               send('tts:play', { id, audioBase64: audio.audioBase64, mime: audio.mime })
               await addTts((audio.chars / 1e6) * ELEVENLABS_USD_PER_MCHAR)
@@ -581,7 +585,13 @@ async function stopAll(): Promise<void> {
 // ---- IPC ----
 
 ipcMain.handle('settings:get', () => loadSettings())
-ipcMain.handle('settings:save', (_e, patch: Partial<Settings>) => saveSettings(patch))
+ipcMain.handle('settings:save', async (_e, patch: Partial<Settings>) => {
+  const next = await saveSettings(patch)
+  // Keep the in-flight session's view of settings fresh so live-applied toggles
+  // (e.g. speak-aloud) take effect without a capture restart.
+  if (running && activeSettings) activeSettings = next
+  return next
+})
 
 ipcMain.handle('usage:get', async () => {
   const u = await getUsage()
@@ -627,10 +637,37 @@ ipcMain.handle('capture:start', async () => {
   // app means our own output is never in the stream → no feedback loop. The renderer
   // does NOT capture system audio on macOS.
   if (process.platform === 'darwin' && s.captureSystemAudio) {
-    const { MacSystemTap } = await import('./systemAudioMac')
-    macTap = new MacSystemTap(s.captureAppPid || undefined, s.captureAppName, {
+    const { MacSystemTap, listRunningApps } = await import('./systemAudioMac')
+    // PIDs change every time an app restarts — the chosen app's NAME is the durable
+    // identity. Re-resolve it on every Start so a stale pid can never break capture.
+    let pid = s.captureAppPid
+    if (s.captureAppName) {
+      // 1) Among apps currently playing audio (authoritative when it matches).
+      const apps = await listRunningApps()
+      let fresh = apps.find((a) => a.name === s.captureAppName)?.pid
+      // 2) The app may be running but silent right now — resolve via the process list.
+      if (!fresh) fresh = await pidByName(s.captureAppName)
+      if (fresh) {
+        if (fresh !== pid) {
+          dbg(`re-resolved "${s.captureAppName}" pid ${pid} -> ${fresh}`)
+          pid = fresh
+          await saveSettings({ captureAppPid: pid })
+        }
+      } else {
+        running = false
+        stopAccrual()
+        throw new Error(
+          `${s.captureAppName} isn’t running. Open it (or pick another app to listen to).`
+        )
+      }
+    }
+    macTap = new MacSystemTap(pid || undefined, s.captureAppName, {
       onData: (pcm) => {
         if (!running) return
+        if (!screenPermSaved) {
+          screenPermSaved = true // audio flowed → screen-recording permission is proven
+          void saveSettings({ screenPermVerified: true })
+        }
         if (!sessions.system) startSession('system', s)
         sessions.system?.sendAudio(pcm)
         // When the source app is muted at the tap, replay it quietly in the renderer so
@@ -657,6 +694,18 @@ ipcMain.handle('capture:start', async () => {
   // Windows/Linux: the renderer captures system audio via getDisplayMedia.
   return { captureSystemInRenderer: s.captureSystemAudio }
 })
+
+// Resolve a (possibly silent) running app's pid by its exact process name — the
+// audio-apps list only shows apps actively playing sound.
+function pidByName(name: string): Promise<number | undefined> {
+  return new Promise((resolve) => {
+    execFile('/usr/bin/pgrep', ['-x', name], (err, stdout) => {
+      if (err) return resolve(undefined)
+      const pid = parseInt(stdout.split('\n')[0], 10)
+      resolve(Number.isFinite(pid) && pid > 0 ? pid : undefined)
+    })
+  })
+}
 
 // Throttle the captured-audio level to the renderer for the "Them" dot.
 function emitSystemLevel(rms: number): void {
@@ -690,10 +739,13 @@ ipcMain.on('open-mic-settings', () => {
   )
 })
 
-ipcMain.handle('permissions:get', () => {
+ipcMain.handle('permissions:get', async () => {
   if (process.platform !== 'darwin') return { screen: 'granted', microphone: 'granted' }
+  // macOS reports the screen/system-audio status unreliably; if audio has actually
+  // flowed in a past session, the permission is proven — don't show a false "Grant".
+  const st = await loadSettings()
   return {
-    screen: systemPreferences.getMediaAccessStatus('screen'),
+    screen: st.screenPermVerified ? 'granted' : systemPreferences.getMediaAccessStatus('screen'),
     microphone: systemPreferences.getMediaAccessStatus('microphone')
   }
 })

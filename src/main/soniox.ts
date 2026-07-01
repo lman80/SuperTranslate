@@ -27,6 +27,8 @@ const MAX_CHUNK_MS = 4000
 // "3.14" / "Mr." don't split mid-token.
 const SENT_END = /[。！？…][”’"')\]）】»]*|[.!?]+[”’"')\]]*(?=\s|$)/
 
+const MAX_RECONNECTS = 8
+
 export class SonioxSession {
   private ws: WebSocket | null = null
   private finalText = ''
@@ -34,6 +36,9 @@ export class SonioxSession {
   private lastFlush = 0
   private keepalive: ReturnType<typeof setInterval> | null = null
   private stopped = false
+  private fatal = false // bad key / auth error — don't reconnect into a loop
+  private attempts = 0
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly cfg: SonioxConfig,
@@ -55,6 +60,7 @@ export class SonioxSession {
     this.ws = ws
 
     ws.onopen = () => {
+      this.attempts = 0 // healthy again — reset the backoff
       ws.send(
         JSON.stringify({
           api_key: this.cfg.apiKey,
@@ -77,12 +83,25 @@ export class SonioxSession {
     ws.onmessage = (evt: MessageEvent) => this.handleMessage(evt.data)
 
     ws.onerror = () => {
-      if (!this.stopped) this.cb.onError('Soniox connection error (check your API key / network).')
+      /* onclose always follows; reconnect is handled there */
     }
 
     ws.onclose = () => {
       if (this.keepalive) clearInterval(this.keepalive)
       this.cb.onStatus('closed')
+      // Soniox (or the network) dropped us mid-session. Reconnect automatically so the
+      // app never goes silently deaf — previously this just died until a manual restart.
+      if (this.stopped || this.fatal) return
+      if (this.attempts >= MAX_RECONNECTS) {
+        this.cb.onError('Speech recognition lost its connection repeatedly. Press Stop, then Start again.')
+        return
+      }
+      this.attempts++
+      const delay = Math.min(500 * this.attempts, 3000)
+      this.cb.onStatus('connecting')
+      this.reconnectTimer = setTimeout(() => {
+        if (!this.stopped) this.start()
+      }, delay)
     }
   }
 
@@ -97,6 +116,10 @@ export class SonioxSession {
     }
 
     if (msg.error_code) {
+      // Auth/key problems won't fix themselves — surface once and don't reconnect-loop.
+      if (/api[_ ]?key|auth|unauthor|invalid/i.test(`${msg.error_type} ${msg.error_message}`)) {
+        this.fatal = true
+      }
       this.cb.onError(`Soniox ${msg.error_type ?? 'error'}: ${msg.error_message ?? ''}`)
       return
     }
@@ -178,6 +201,10 @@ export class SonioxSession {
 
   stop(): void {
     this.stopped = true
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     if (this.keepalive) clearInterval(this.keepalive)
     const ws = this.ws
     if (ws && ws.readyState === 1) {

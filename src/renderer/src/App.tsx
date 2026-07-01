@@ -249,8 +249,9 @@ const CAPTURE_KEYS = new Set<keyof Settings>([
   'ttsEngine',
   'elevenLabsApiKey',
   'elevenLabsVoiceId',
-  'responseSpeed',
-  'speakAloud'
+  'responseSpeed'
+  // NOTE: speakAloud is intentionally NOT here — the speak decision is read live at
+  // translation time, so toggling it must not tear down and restart capture.
 ])
 
 function engineReady(s: Settings): boolean {
@@ -438,12 +439,14 @@ export default function App() {
   }, [applyBgGain])
   const guardOff = useCallback(() => {
     if (ttsGuardTimer.current) clearTimeout(ttsGuardTimer.current)
+    // 900ms: speech onend fires slightly before the sound finishes through speakers +
+    // the mic pipeline — a short tail was leaking our own voice into the transcript.
     ttsGuardTimer.current = setTimeout(() => {
       setMicMuted(false)
       setSystemMuted(false)
       bgDuckedRef.current = false
       applyBgGain()
-    }, 400)
+    }, 900)
   }, [applyBgGain])
   const turboGuard = useCallback(
     (msUntilDone: number) => {
@@ -697,7 +700,9 @@ export default function App() {
       else flash('Capturing this app — lower its volume to reduce overlap')
     })
     const offStatus = window.api.onStatus(({ source, status }) => {
-      if (source !== 'system' || !settingsRef.current?.turboMode) return
+      if (source !== 'system') return
+      // Both engines: show "Connecting…" while the system session (re)connects, so a
+      // dropped connection is visible instead of silently deaf.
       setTurboConnecting(status === 'connecting')
     })
     const offDock = window.api.onDock(({ dock }) => {
@@ -803,7 +808,11 @@ export default function App() {
       )
       setRunning(true)
     } catch (e) {
-      addBanner('err-start', { kind: 'error', text: (e as Error).message, dismissable: true })
+      // Strip Electron's IPC wrapper so the user sees plain words, not plumbing.
+      const msg = (e as Error).message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')
+      addBanner('err-start', { kind: 'error', text: msg, dismissable: true, ttl: 12000 })
+      // The chosen app is gone (quit/restarted) — take the user straight to re-picking it.
+      if (/pick (the|another) app/i.test(msg)) setPopover('app')
       await window.api.stopCapture().catch(() => undefined)
     } finally {
       setBusy(false)
@@ -1072,7 +1081,19 @@ export default function App() {
               onStop={doStop}
               onToggleMic={() => applyLive({ captureMic: !settings.captureMic })}
               onToggleOriginal={() => applyLive({ showOriginal: !settings.showOriginal })}
-              onVolume={setVoiceVolume}
+              onVolume={(v) => {
+                setVoiceVolume(v)
+                // Dragging the volume means "I want to hear it" — enable the voice.
+                if (!settings.turboMode && !settings.speakAloud) {
+                  void applyLive({ speakAloud: true })
+                  flash('Spoken translation on 🔊')
+                }
+              }}
+              onToggleSpeak={() => {
+                void applyLive({ speakAloud: !settings.speakAloud })
+                flash(settings.speakAloud ? 'Spoken translation off' : 'Spoken translation on 🔊')
+              }}
+              voiceOn={settings.turboMode || settings.speakAloud}
               onFont={cycleFont}
               onPopover={(p) => setPopover((cur) => (cur === p ? null : p))}
               onToggleEngine={toggleEngine}
@@ -1324,6 +1345,8 @@ function LiveControlRow({
   onToggleMic,
   onToggleOriginal,
   onVolume,
+  onToggleSpeak,
+  voiceOn,
   onFont,
   onPopover,
   onToggleEngine,
@@ -1343,6 +1366,8 @@ function LiveControlRow({
   onToggleMic: () => void
   onToggleOriginal: () => void
   onVolume: (v: number) => void
+  onToggleSpeak: () => void
+  voiceOn: boolean
   onFont: () => void
   onPopover: (p: Popover) => void
   onToggleEngine: () => void
@@ -1377,8 +1402,28 @@ function LiveControlRow({
         >
           {settings.showOriginal ? '👁' : '⊘'}
         </button>
-        <div className="vol" title={`Voice volume ${Math.round(settings.voiceVolume * 100)}%`}>
-          <span>🔊</span>
+        <div
+          className={`vol ${voiceOn ? '' : 'off'}`}
+          title={
+            voiceOn
+              ? `Voice volume ${Math.round(settings.voiceVolume * 100)}%`
+              : 'Voice is off — tap the speaker (or drag) to hear the translation aloud'
+          }
+        >
+          <button
+            className="volbtn"
+            onClick={onToggleSpeak}
+            title={
+              settings.turboMode
+                ? 'Turbo always speaks'
+                : voiceOn
+                  ? 'Turn the spoken translation off'
+                  : 'Turn the spoken translation on'
+            }
+            disabled={settings.turboMode}
+          >
+            {voiceOn ? '🔊' : '🔇'}
+          </button>
           <input
             type="range"
             min={0}
@@ -1406,7 +1451,11 @@ function LiveControlRow({
           onClick={onAsk}
           title="Ask the assistant about the conversation"
         >
-          💬 {ASK_WORD[settings.theirLanguage] ?? 'Ask'}
+          💬{' '}
+          {(() => {
+            const w = settings.assistantAnswerLang || settings.theirLanguage
+            return ASK_WORD[w === 'auto' ? 'zh' : w] ?? 'Ask'
+          })()}
         </button>
       )}
       <button
@@ -1695,7 +1744,11 @@ function AppPickerPopover({
       </div>
       <div className="pop-list">
         {loading && <div className="pop-empty">Loading…</div>}
-        {!loading && apps.length === 0 && <div className="pop-empty">No audio apps found.</div>}
+        {!loading && apps.length === 0 && (
+          <div className="pop-empty">
+            No apps are playing audio right now. Play something in your call/video app, then tap ↻.
+          </div>
+        )}
         {apps.map((a) => (
           <button
             key={a.pid}

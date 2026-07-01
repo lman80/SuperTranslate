@@ -335,6 +335,22 @@ select {
   width: 54px;
   accent-color: var(--accent);
 }
+.vol.off input[type='range'] {
+  opacity: 0.35;
+}
+.volbtn {
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  padding: 2px;
+  border-radius: 5px;
+}
+.volbtn:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.volbtn:disabled {
+  cursor: default;
+}
 
 .meter {
   display: flex;

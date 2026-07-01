@@ -36,6 +36,7 @@ export interface Settings {
   fontScalePref: number // active font scale chosen via A-/A+ (overrides fontScale when set)
   assistantAnswerLang: string // language the meeting assistant answers in ('' = use theirLanguage)
   assistAutoSpeak: boolean // speak the assistant's answer aloud
+  screenPermVerified: boolean // system audio has actually flowed once — permission is proven (macOS reports it unreliably)
   dock: Dock // overlay docking position on screen
   overlayBounds?: { x: number; y: number; width: number; height: number } // remembered free-drag position
   displayId?: number // display the overlay was last on (for multi-monitor restore)
@@ -71,6 +72,7 @@ const defaults: Settings = {
   fontScalePref: 1,
   assistantAnswerLang: '',
   assistAutoSpeak: true,
+  screenPermVerified: false,
   dock: 'top-center'
 }
 
