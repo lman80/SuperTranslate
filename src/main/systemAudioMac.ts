@@ -30,9 +30,12 @@ export async function listRunningApps(): Promise<RunningApp[]> {
     const AudioCapture = await loadAudioCapture()
     if (!lister) lister = new AudioCapture()
     const apps = lister.getAudioApps() as { processId: number; applicationName: string }[]
+    // Never offer to capture ourselves (past + present names) — it would loop our own
+    // translation voice straight back into the recognizer.
+    const self = /supertranslate|supercaption|electron/i
     return apps
       .map((a) => ({ pid: a.processId, name: a.applicationName }))
-      .filter((a) => a.pid > 0 && a.name)
+      .filter((a) => a.pid > 0 && a.name && !self.test(a.name))
   } catch {
     return []
   }
