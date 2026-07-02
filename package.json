@@ -1,6 +1,6 @@
 {
   "name": "supertranslate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Live speech-translation overlay for Mac & Windows (Korean / Chinese / English)",
   "main": "./out/main/index.js",
   "author": "Brimmer Industries",
